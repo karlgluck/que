@@ -1483,14 +1483,7 @@ function New-QueWorkspace {
     # Step 3: Save encrypted PAT
     Set-SecureGitHubPAT -PlainPAT $PlainPAT -WorkspaceRoot $WorkspaceRoot
 
-    # Step 4: Install dependencies
-    Install-AllDependencies
-
-    # Step 5: Initialize SyncThing
-    Write-Host "`nInitializing SyncThing..." -ForegroundColor Cyan
-    $SyncThingInfo = Initialize-SyncThing -WorkspaceRoot $WorkspaceRoot
-
-    # Step 6: Check if GitHub repo exists
+    # Step 4: Check if GitHub repo exists
     $RepoExists = $false
     try {
         $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
@@ -1508,7 +1501,7 @@ function New-QueWorkspace {
         }
     }
 
-    # Step 7: Determine initialization mode
+    # Step 5: Determine initialization mode
     $ShouldClone = $false
     $InitMode = 0  # 0 = blank, 1 = from GitHub, 2 = from local
 
@@ -1630,6 +1623,13 @@ function New-QueWorkspace {
             }
         }
     }
+
+    # Step 6: Install dependencies
+    Install-AllDependencies
+
+    # Step 7: Initialize SyncThing
+    Write-Host "`nInitializing SyncThing..." -ForegroundColor Cyan
+    $SyncThingInfo = Initialize-SyncThing -WorkspaceRoot $WorkspaceRoot
 
     # Step 8: Create first clone
     Write-Host "`nCreating first clone..." -ForegroundColor Cyan
