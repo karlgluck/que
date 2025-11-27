@@ -2068,7 +2068,7 @@ function Invoke-QueMain {
     # MODE 2: RUN FROM URL - Workspace/Clone Creation
     if ($IsRunFromUrl) {
         # Extract GitHub info from URL
-        if ($queUrl -match 'github\.com/([^/]+)/([^/]+)/') {
+        if ($queUrl -match 'githubusercontent\.com/([^/]+)/([^/]+)/') {
             $GitHubOwner = $matches[1]
             $GitHubRepo = $matches[2] -replace '\.ps1$', ''
 
