@@ -1064,6 +1064,53 @@ function Write-UEGitConfigFiles {
 # Unreal Engine Helper Functions
 # ----------------------------------------------------------------------------
 
+function Get-EpicGamesLauncherExecutable {
+    <#
+    .SYNOPSIS
+        Locates the Epic Games Launcher executable
+    .DESCRIPTION
+        Tries multiple methods to find EpicGamesLauncher.exe:
+        1. Check common installation paths
+        2. Check winget package location
+        3. Check registry
+    #>
+
+    # Check standard installation paths first
+    $StandardPaths = @(
+        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe',
+        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win32\EpicGamesLauncher.exe',
+        'C:\Program Files\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
+    )
+    foreach ($Path in $StandardPaths) {
+        if (Test-Path $Path) {
+            return $Path
+        }
+    }
+
+    # Check winget package location
+    $WingetPackages = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
+    if (Test-Path $WingetPackages) {
+        $EpicDirs = Get-ChildItem -Path $WingetPackages -Filter "EpicGames.EpicGamesLauncher*" -Directory -ErrorAction SilentlyContinue
+        foreach ($Dir in $EpicDirs) {
+            $ExePath = Get-ChildItem -Path $Dir.FullName -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($ExePath) {
+                return $ExePath.FullName
+            }
+        }
+    }
+
+    # Check user's local Programs folder
+    $LocalPrograms = "$env:LOCALAPPDATA\Programs\Epic Games"
+    if (Test-Path $LocalPrograms) {
+        $ExePath = Get-ChildItem -Path $LocalPrograms -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ExePath) {
+            return $ExePath.FullName
+        }
+    }
+
+    return $null
+}
+
 function Get-UnrealProjectEngineVersion {
     <#
     .SYNOPSIS
@@ -1421,15 +1468,13 @@ function Install-AllDependencies {
         $Response = Read-Host "Open Epic Games Launcher to install UE 5.7? (Y/n)"
         if ($Response -notmatch '^n') {
             # Try to launch Epic Games Launcher
-            $LauncherPaths = @(
-                'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
-                'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win32\EpicGamesLauncher.exe'
-            )
-            foreach ($Path in $LauncherPaths) {
-                if (Test-Path $Path) {
-                    Start-Process $Path -ArgumentList "-openueversion=5.7"
-                    break
-                }
+            $LauncherPath = Get-EpicGamesLauncherExecutable
+            if ($LauncherPath) {
+                Write-Host "Launching Epic Games Launcher from: $LauncherPath" -ForegroundColor Gray
+                Start-Process $LauncherPath -ArgumentList "-openueversion=5.7"
+            } else {
+                Write-Warning "Could not locate Epic Games Launcher executable"
+                Write-Host "Please open Epic Games Launcher manually and install Unreal Engine 5.7" -ForegroundColor Yellow
             }
         }
 
