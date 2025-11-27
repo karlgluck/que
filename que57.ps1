@@ -596,6 +596,57 @@ function Sync-WingetPackage {
     Write-Error "Failed to install $PackageName after $MaxAttempts attempts"
 }
 
+function Get-UserSelectionIndex {
+    <#
+    .SYNOPSIS
+        Prompts the user to choose from a list of options
+    .DESCRIPTION
+        Displays numbered options and prompts for selection
+        Returns the index of the selected option (0-based)
+        Returns -1 if no valid selection is made
+        Supports default selection and auto-selection of single option
+    #>
+    Param (
+        [string[]]$Options,
+        [int]$Default,
+        [switch]$DontShortcutSingleChoice
+    )
+
+    if ($Options.Count -eq 0) {
+        return -1
+    }
+
+    if ($Options.Count -eq 1 -and (-not $DontShortcutSingleChoice)) {
+        return 0
+    }
+
+    # Display options to the user
+    for ($i = 0; $i -lt $Options.Count; $i++) {
+        if ($i -eq $Default) { $Star = "*" } else { $Star = "" }
+        Write-Host ("{0,5}: {1}" -f @(("{0}{1}" -f @($Star, ($i + 1))), $Options[$i]))
+    }
+
+    # Prompt for input
+    $Selection = Read-Host "Select an option [$($Default+1)]"
+
+    # Handle selection
+    if ($Selection -eq "") {
+        return $Default
+    } elseif ($Selection -match '^\d+$' -and $Selection -le $Options.Count -and $Selection -gt 0) {
+        return ($Selection - 1)
+    } else {
+        # Try to match full string
+        $MatchedIndex = -1
+        for ($i = 0; $i -lt $Options.Count; $i++) {
+            if ($Options[$i] -eq $Selection) {
+                $MatchedIndex = $i
+                break
+            }
+        }
+        return $MatchedIndex
+    }
+}
+
 # ----------------------------------------------------------------------------
 # SyncThing Helper Functions
 # ----------------------------------------------------------------------------
@@ -1402,29 +1453,20 @@ function New-QueWorkspace {
         Creates a new QUE workspace
     .DESCRIPTION
         Creates workspace structure, validates GitHub PAT, creates first clone
+        Supports multiple initialization modes: blank, from GitHub, from local repo
     #>
     param(
         [string]$GitHubOwner,
-        [string]$GitHubRepo
+        [string]$GitHubRepo,
+        [string]$PlainPAT,
+        [object]$UserInfo
     )
 
     $WorkspaceRoot = Get-Location
 
     Write-Host "`nCreating QUE workspace for $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
 
-    # Step 1: Get and validate GitHub PAT
-    $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
-    $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
-
-    $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
-    if (-not $UserInfo) {
-        Write-Error "Invalid GitHub PAT. Please check your token and try again."
-        return
-    }
-
-    Write-Host "Authenticated as: $($UserInfo.login)" -ForegroundColor Green
-
-    # Step 2: Create workspace structure
+    # Step 1: Create workspace structure
     Write-Host "`nCreating workspace structure..."
     New-Item -ItemType Directory -Force -Path ".que" | Out-Null
     New-Item -ItemType Directory -Force -Path ".que/repo" | Out-Null
@@ -1434,74 +1476,211 @@ function New-QueWorkspace {
     New-Item -ItemType Directory -Force -Path "env/syncthing-home" | Out-Null
     New-Item -ItemType Directory -Force -Path "repo" | Out-Null
 
-    # Step 3: Write workspace metadata
+    # Step 2: Write workspace metadata
     Set-Content -Path ".que/gh-repo-owner" -Value $GitHubOwner
     Set-Content -Path ".que/gh-repo-name" -Value $GitHubRepo
 
-    # Step 4: Save encrypted PAT
+    # Step 3: Save encrypted PAT
     Set-SecureGitHubPAT -PlainPAT $PlainPAT -WorkspaceRoot $WorkspaceRoot
 
-    # Step 5: Install dependencies
+    # Step 4: Install dependencies
     Install-AllDependencies
 
-    # Step 6: Initialize SyncThing
+    # Step 5: Initialize SyncThing
     Write-Host "`nInitializing SyncThing..." -ForegroundColor Cyan
     $SyncThingInfo = Initialize-SyncThing -WorkspaceRoot $WorkspaceRoot
 
-    # Step 7: Check if GitHub repo exists
+    # Step 6: Check if GitHub repo exists
+    $RepoExists = $false
     try {
         $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
         $RepoUrl = "https://api.github.com/repos/$GitHubOwner/$GitHubRepo"
         $Response = Invoke-WebRequest -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
         $RepoExists = $true
-        Write-Host "`nRepository $GitHubOwner/$GitHubRepo exists" -ForegroundColor Green
+        Write-Host "`nRepository $GitHubOwner/$GitHubRepo already exists on GitHub" -ForegroundColor Green
     } catch {
         if ($_.Exception.Response.StatusCode -eq 404) {
             $RepoExists = $false
-            Write-Host "`nRepository $GitHubOwner/$GitHubRepo does not exist" -ForegroundColor Yellow
+            Write-Host "`nRepository $GitHubOwner/$GitHubRepo does not exist on GitHub" -ForegroundColor Yellow
         } else {
             Write-Error "Failed to check if repository exists: $($_.Exception.Message)"
             return
         }
     }
 
+    # Step 7: Determine initialization mode
+    $ShouldClone = $false
+    $InitMode = 0  # 0 = blank, 1 = from GitHub, 2 = from local
+
     if ($RepoExists) {
-        $Response = Read-Host "Repository exists. Clone it? (Y/n)"
+        Write-Host "`nRepository exists on GitHub. Initialize workspace for use with Que?" -ForegroundColor Yellow
+        $Response = Read-Host "(Y/n)"
         if ($Response -match '^n') {
             Write-Host "Aborting workspace creation."
             return
         }
         $ShouldClone = $true
+        $InitMode = 1  # From GitHub
     } else {
-        Write-Host "Creating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
-        try {
-            $CreateRepoBody = @{
-                name = $GitHubRepo
-                private = $true
-                auto_init = $false
-            } | ConvertTo-Json
+        Write-Host "`nSelect initialization method:" -ForegroundColor Yellow
+        $Options = @(
+            "Create a blank project",
+            "Create from existing GitHub project URL",
+            "Create from existing local repository"
+        )
+        $InitMode = Get-UserSelectionIndex -Options $Options -Default 0
 
-            $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
-                "https://api.github.com/user/repos"
-            } else {
-                "https://api.github.com/orgs/$GitHubOwner/repos"
-            }
-
-            Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
-            Write-Host "Repository created successfully" -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to create repository: $($_.Exception.Message)"
-            Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $GitHubOwner"
+        if ($InitMode -lt 0) {
+            Write-Error "Invalid selection. Aborting."
             return
         }
-        $ShouldClone = $false
+
+        switch ($InitMode) {
+            0 {
+                # Blank project - create new repo on GitHub
+                Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
+                try {
+                    $CreateRepoBody = @{
+                        name = $GitHubRepo
+                        private = $true
+                        auto_init = $false
+                    } | ConvertTo-Json
+
+                    $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
+                        "https://api.github.com/user/repos"
+                    } else {
+                        "https://api.github.com/orgs/$GitHubOwner/repos"
+                    }
+
+                    Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
+                    Write-Host "Repository created successfully" -ForegroundColor Green
+                } catch {
+                    Write-Error "Failed to create repository: $($_.Exception.Message)"
+                    Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $GitHubOwner"
+                    return
+                }
+                $ShouldClone = $false
+            }
+            1 {
+                # From existing GitHub project
+                $SourceUrl = Read-Host "`nEnter GitHub project URL (e.g., https://github.com/owner/repo)"
+                if ([string]::IsNullOrWhiteSpace($SourceUrl)) {
+                    Write-Error "URL cannot be empty"
+                    return
+                }
+
+                # Create repo on GitHub first
+                Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
+                try {
+                    $CreateRepoBody = @{
+                        name = $GitHubRepo
+                        private = $true
+                        auto_init = $false
+                    } | ConvertTo-Json
+
+                    $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
+                        "https://api.github.com/user/repos"
+                    } else {
+                        "https://api.github.com/orgs/$GitHubOwner/repos"
+                    }
+
+                    Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
+                    Write-Host "Repository created successfully" -ForegroundColor Green
+                } catch {
+                    Write-Error "Failed to create repository: $($_.Exception.Message)"
+                    return
+                }
+
+                # Clone from source URL, then push to new repo
+                $ShouldClone = $false
+                $CloneFromSource = $SourceUrl
+            }
+            2 {
+                # From local repository
+                $LocalRepoPath = Read-Host "`nEnter path to local repository"
+                if ([string]::IsNullOrWhiteSpace($LocalRepoPath) -or -not (Test-Path $LocalRepoPath)) {
+                    Write-Error "Invalid repository path"
+                    return
+                }
+
+                # Create repo on GitHub first
+                Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
+                try {
+                    $CreateRepoBody = @{
+                        name = $GitHubRepo
+                        private = $true
+                        auto_init = $false
+                    } | ConvertTo-Json
+
+                    $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
+                        "https://api.github.com/user/repos"
+                    } else {
+                        "https://api.github.com/orgs/$GitHubOwner/repos"
+                    }
+
+                    Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
+                    Write-Host "Repository created successfully" -ForegroundColor Green
+                } catch {
+                    Write-Error "Failed to create repository: $($_.Exception.Message)"
+                    return
+                }
+
+                $ShouldClone = $false
+                $CopyFromLocal = $LocalRepoPath
+            }
+        }
     }
 
     # Step 8: Create first clone
     Write-Host "`nCreating first clone..." -ForegroundColor Cyan
     New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone $true -ShouldClone $ShouldClone -UserInfo $UserInfo -PlainPAT $PlainPAT -SyncThingInfo $SyncThingInfo
 
-    # Step 9: Mark workspace as complete
+    # Step 9: Handle special initialization modes
+    if ($InitMode -eq 1 -and $CloneFromSource) {
+        # Clone from source GitHub URL and push to new repo
+        Write-Host "`nCloning from source repository..." -ForegroundColor Cyan
+        $CloneName = Get-Content "$WorkspaceRoot\.que\repo" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if (-not $CloneName) {
+            # Find the most recent clone
+            $CloneName = (Get-ChildItem "$WorkspaceRoot\repo" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
+        }
+        $CloneRoot = Join-Path $WorkspaceRoot "repo\$CloneName"
+
+        Push-Location $CloneRoot
+        git remote add source $CloneFromSource
+        git fetch source
+        git merge source/main --allow-unrelated-histories -m "Import from $CloneFromSource"
+        git push origin main
+        git remote remove source
+        Pop-Location
+
+        Write-Host "Imported from source repository" -ForegroundColor Green
+    } elseif ($InitMode -eq 2 -and $CopyFromLocal) {
+        # Copy from local repository
+        Write-Host "`nCopying from local repository..." -ForegroundColor Cyan
+        $CloneName = Get-Content "$WorkspaceRoot\.que\repo" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if (-not $CloneName) {
+            $CloneName = (Get-ChildItem "$WorkspaceRoot\repo" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
+        }
+        $CloneRoot = Join-Path $WorkspaceRoot "repo\$CloneName"
+
+        # Copy files from local repo (excluding .git)
+        $SourceFiles = Get-ChildItem $CopyFromLocal -Exclude ".git" -Force
+        foreach ($File in $SourceFiles) {
+            Copy-Item $File.FullName -Destination $CloneRoot -Recurse -Force
+        }
+
+        # Commit and push
+        Push-Location $CloneRoot
+        git add -A
+        git commit -m "Import from local repository"
+        git push origin main
+        Pop-Location
+
+        Write-Host "Imported from local repository" -ForegroundColor Green
+    }
+
+    # Step 10: Mark workspace as complete
     Set-Content -Path ".que/workspace-version" -Value "1"
 
     Write-Host "`nWorkspace created successfully!" -ForegroundColor Green
@@ -2067,50 +2246,123 @@ function Invoke-QueMain {
     ###QUE_CREATION_MODE_BEGIN###
     # MODE 2: RUN FROM URL - Workspace/Clone Creation
     if ($IsRunFromUrl) {
-        # Extract GitHub info from URL
-        if ($queUrl -match 'githubusercontent\.com/([^/]+)/([^/]+)/') {
-            $GitHubOwner = $matches[1]
-            $GitHubRepo = $matches[2] -replace '\.ps1$', ''
+        # Extract GitHub info from URL (if available)
+        $UrlOwner = $null
+        $UrlRepo = $null
+        $IsBootstrapScript = $false
 
-            Write-Host "`nQUE 5.7 - Quick Unreal Engine Project Manager" -ForegroundColor Cyan
-            Write-Host "Repository: $GitHubOwner/$GitHubRepo`n" -ForegroundColor Green
-        } else {
-            Write-Error "Cannot parse GitHub owner/repo from URL: $queUrl"
-            return
+        if ($queUrl -match 'githubusercontent\.com/([^/]+)/([^/]+)/[^/]+/(.+)$') {
+            $UrlOwner = $matches[1]
+            $UrlRepo = $matches[2]
+            $ScriptName = $matches[3]
+
+            # Check if this is the bootstrap script (que57.ps1) or a project script (que-REPO.ps1)
+            if ($ScriptName -eq 'que57.ps1') {
+                $IsBootstrapScript = $true
+            }
         }
 
         # Detect workspace context
         $WorkspaceRoot = Find-QueWorkspace
 
         if ($WorkspaceRoot) {
-            # In a workspace - check if it matches
+            # In a workspace - check if it matches (for joining existing projects)
             $ExistingOwner = Get-Content "$WorkspaceRoot\.que\gh-repo-owner"
             $ExistingRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
 
-            if ($ExistingOwner -eq $GitHubOwner -and $ExistingRepo -eq $GitHubRepo) {
-                # Mode 2A: Create new clone in matching workspace
-                Write-Host "Found matching workspace at: $WorkspaceRoot" -ForegroundColor Green
-                New-QueClone -WorkspaceRoot $WorkspaceRoot
+            if ($UrlOwner -and $UrlRepo -and -not $IsBootstrapScript) {
+                if ($ExistingOwner -eq $UrlOwner -and $ExistingRepo -eq $UrlRepo) {
+                    # Mode 2A: Create new clone in matching workspace
+                    Write-Host "Found matching workspace at: $WorkspaceRoot" -ForegroundColor Green
+                    New-QueClone -WorkspaceRoot $WorkspaceRoot
+                } else {
+                    # Mode 2B: Error - mismatched workspace
+                    Write-Error "Current workspace is for $ExistingOwner/$ExistingRepo, but you're trying to create $UrlOwner/$UrlRepo"
+                    Write-Host "Please run this command in a folder outside this workspace to create a new workspace." -ForegroundColor Yellow
+                    return
+                }
             } else {
-                # Mode 2B: Error - mismatched workspace
-                Write-Error "Current workspace is for $ExistingOwner/$ExistingRepo, but you're trying to create $GitHubOwner/$GitHubRepo"
-                Write-Host "Please run this command in an empty folder to create a new workspace." -ForegroundColor Yellow
+                Write-Error "Already in a QUE workspace for $ExistingOwner/$ExistingRepo"
+                Write-Host "To create a new workspace, run this command outside of an existing workspace." -ForegroundColor Yellow
                 return
             }
         } else {
-            # Not in a workspace - check if folder is empty
-            $CurrentItems = Get-ChildItem -Force -ErrorAction SilentlyContinue
+            # Not in a workspace
+            Write-Host "`nQUE 5.7 - Quick Unreal Engine Project Manager" -ForegroundColor Cyan
 
-            if ($CurrentItems.Count -gt 0) {
-                # Mode 2C: Error - non-empty folder
-                Write-Error "Current folder is not empty and not a QUE workspace."
-                Write-Host "Please run this command in:" -ForegroundColor Yellow
-                Write-Host "  - An empty folder (to create new workspace)" -ForegroundColor Yellow
-                Write-Host "  - An existing QUE workspace for $GitHubOwner/$GitHubRepo (to create new clone)" -ForegroundColor Yellow
-                return
+            if ($IsBootstrapScript) {
+                # Bootstrap mode - prompt for new repo name
+                Write-Host "Setting up a new workspace...`n" -ForegroundColor Green
+
+                # Prompt for repository name
+                $GitHubRepo = Read-Host "Enter repository name"
+                if ([string]::IsNullOrWhiteSpace($GitHubRepo)) {
+                    Write-Error "Repository name cannot be empty"
+                    return
+                }
+
+                # Create subfolder for workspace
+                $WorkspaceRoot = Join-Path (Get-Location) $GitHubRepo
+                if (Test-Path $WorkspaceRoot) {
+                    Write-Host "`nFolder '$GitHubRepo' already exists" -ForegroundColor Yellow
+                } else {
+                    Write-Host "`nCreating workspace folder: $GitHubRepo" -ForegroundColor Cyan
+                    New-Item -ItemType Directory -Path $WorkspaceRoot | Out-Null
+                }
+
+                # Change to workspace directory
+                Set-Location $WorkspaceRoot
+
+                # Prompt for PAT
+                $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
+                $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
+
+                # Get user info from PAT
+                $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
+                if (-not $UserInfo) {
+                    Write-Error "Invalid GitHub PAT. Please check your token and try again."
+                    return
+                }
+
+                Write-Host "Authenticated as: $($UserInfo.login)" -ForegroundColor Green
+                $GitHubOwner = $UserInfo.login
+
+                # Create new workspace with initialization options
+                New-QueWorkspace -GitHubOwner $GitHubOwner -GitHubRepo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo
+            } elseif ($UrlOwner -and $UrlRepo) {
+                # Joining existing project - use URL owner/repo
+                Write-Host "Joining project: $UrlOwner/$UrlRepo`n" -ForegroundColor Green
+
+                # Create subfolder for workspace
+                $WorkspaceRoot = Join-Path (Get-Location) $UrlRepo
+                if (Test-Path $WorkspaceRoot) {
+                    Write-Host "`nFolder '$UrlRepo' already exists" -ForegroundColor Yellow
+                } else {
+                    Write-Host "`nCreating workspace folder: $UrlRepo" -ForegroundColor Cyan
+                    New-Item -ItemType Directory -Path $WorkspaceRoot | Out-Null
+                }
+
+                # Change to workspace directory
+                Set-Location $WorkspaceRoot
+
+                # Prompt for PAT
+                $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
+                $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
+
+                # Get user info from PAT
+                $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
+                if (-not $UserInfo) {
+                    Write-Error "Invalid GitHub PAT. Please check your token and try again."
+                    return
+                }
+
+                Write-Host "Authenticated as: $($UserInfo.login)" -ForegroundColor Green
+
+                # Create workspace and clone existing repo
+                New-QueWorkspace -GitHubOwner $UrlOwner -GitHubRepo $UrlRepo -PlainPAT $PlainPAT -UserInfo $UserInfo
             } else {
-                # Mode 2D: Create new workspace
-                New-QueWorkspace -GitHubOwner $GitHubOwner -GitHubRepo $GitHubRepo
+                Write-Error "Cannot determine repository information from URL: $queUrl"
+                return
             }
         }
     }
