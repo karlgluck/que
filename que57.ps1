@@ -569,7 +569,7 @@ function Install-NetFx3WithElevation {
             try {
                 Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null
                 Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
-                Read-Host "Press Enter to close this window"
+                Sleep 5
                 exit 0
             } catch {
                 Write-Error "Failed to enable NetFx3: $($_.Exception.Message)"
@@ -1891,6 +1891,7 @@ function New-QueClone {
         git config --local user.email ("{0}-{1}@users.noreply.github.com" -f @($UserInfo.id, $UserInfo.login))
         git config --local credential.username $UserInfo.login
         git config --local lfs.locksverify false
+        git config --local push.autoSetupRemote true
         Pop-Location
 
         # Write UE-specific git files if .uproject exists
@@ -1900,7 +1901,7 @@ function New-QueClone {
         Write-Host "Initializing new repository..." -ForegroundColor Cyan
         Push-Location $CloneRoot
 
-        git init
+        git init -b main
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git init failed"
@@ -1911,6 +1912,7 @@ function New-QueClone {
         git config --local user.email ("{0}-{1}@users.noreply.github.com" -f @($UserInfo.id, $UserInfo.login))
         git config --local credential.username $UserInfo.login
         git config --local lfs.locksverify false
+        git config --local push.autoSetupRemote true
 
         # Add remote
         git remote add origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git"
