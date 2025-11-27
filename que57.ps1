@@ -2395,31 +2395,37 @@ function Invoke-QueMain {
                 return
             }
         } else {
-            # Not in a workspace
+            # Not in a workspace - check if current folder is empty
+            $CurrentItems = Get-ChildItem -Force -ErrorAction SilentlyContinue
+            if ($CurrentItems.Count -gt 0) {
+                Write-Error "Current folder is not empty. QUE workspace must be initialized in an empty folder."
+                Write-Host "Please create and navigate to an empty folder, then run this command again." -ForegroundColor Yellow
+                return
+            }
+
             Write-Host "`nQUE 5.7 - Quick Unreal Engine Project Manager" -ForegroundColor Cyan
+            $WorkspaceRoot = Get-Location
 
             if ($IsBootstrapScript) {
-                # Bootstrap mode - prompt for new repo name
+                # Bootstrap mode - prompt for new repo name with default
                 Write-Host "Setting up a new workspace...`n" -ForegroundColor Green
 
-                # Prompt for repository name
-                $GitHubRepo = Read-Host "Enter repository name"
+                # Generate default repo name from current folder
+                $CurrentFolderName = Split-Path $WorkspaceRoot -Leaf
+                $DefaultRepoName = $CurrentFolderName -replace '[^a-zA-Z0-9_-]', ''
+
+                # Prompt for repository name with default
+                $GitHubRepo = Read-Host "Enter new repository name [$DefaultRepoName]"
+                if ([string]::IsNullOrWhiteSpace($GitHubRepo)) {
+                    $GitHubRepo = $DefaultRepoName
+                }
+
                 if ([string]::IsNullOrWhiteSpace($GitHubRepo)) {
                     Write-Error "Repository name cannot be empty"
                     return
                 }
 
-                # Create subfolder for workspace
-                $WorkspaceRoot = Join-Path (Get-Location) $GitHubRepo
-                if (Test-Path $WorkspaceRoot) {
-                    Write-Host "`nFolder '$GitHubRepo' already exists" -ForegroundColor Yellow
-                } else {
-                    Write-Host "`nCreating workspace folder: $GitHubRepo" -ForegroundColor Cyan
-                    New-Item -ItemType Directory -Path $WorkspaceRoot | Out-Null
-                }
-
-                # Change to workspace directory
-                Set-Location $WorkspaceRoot
+                Write-Host "Using repository name: $GitHubRepo" -ForegroundColor Green
 
                 # Prompt for PAT
                 $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
@@ -2440,18 +2446,6 @@ function Invoke-QueMain {
             } elseif ($UrlOwner -and $UrlRepo) {
                 # Joining existing project - use URL owner/repo
                 Write-Host "Joining project: $UrlOwner/$UrlRepo`n" -ForegroundColor Green
-
-                # Create subfolder for workspace
-                $WorkspaceRoot = Join-Path (Get-Location) $UrlRepo
-                if (Test-Path $WorkspaceRoot) {
-                    Write-Host "`nFolder '$UrlRepo' already exists" -ForegroundColor Yellow
-                } else {
-                    Write-Host "`nCreating workspace folder: $UrlRepo" -ForegroundColor Cyan
-                    New-Item -ItemType Directory -Path $WorkspaceRoot | Out-Null
-                }
-
-                # Change to workspace directory
-                Set-Location $WorkspaceRoot
 
                 # Prompt for PAT
                 $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
