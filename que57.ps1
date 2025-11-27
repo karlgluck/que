@@ -770,94 +770,18 @@ function Get-SyncThingExecutable {
     return $null
 }
 
-function Get-SyncThingGuiApiKey {
-    <#
-    .SYNOPSIS
-        Reads SyncThing API key from config file
-    .DESCRIPTION
-        Parses config.xml in SyncThing home directory to extract API key
-    #>
-    param([string]$SyncThingHome)
-
-    $ConfigPath = Join-Path $SyncThingHome "config.xml"
-    if (-not (Test-Path $ConfigPath)) {
-        return $null
-    }
-
-    try {
-        [xml]$Config = Get-Content $ConfigPath
-        return $Config.configuration.gui.apikey
-    } catch {
-        Write-Warning "Failed to read SyncThing API key: $($_.Exception.Message)"
-        return $null
-    }
-}
-
-function Get-SyncThingDeviceId {
-    <#
-    .SYNOPSIS
-        Queries SyncThing REST API for device ID
-    .DESCRIPTION
-        Uses /rest/system/status endpoint to get current device ID
-    #>
-    param(
-        [string]$GuiAddress,
-        [string]$ApiKey
-    )
-
-    try {
-        $Headers = @{ 'X-API-Key' = $ApiKey }
-        $Response = Invoke-RestMethod -Uri "http://$GuiAddress/rest/system/status" -Headers $Headers -Method Get
-        return $Response.myID
-    } catch {
-        Write-Warning "Failed to get SyncThing device ID: $($_.Exception.Message)"
-        return $null
-    }
-}
-
 function Ensure-SyncThingRunning {
     <#
     .SYNOPSIS
         Ensures SyncThing is running, starts it if needed
     .DESCRIPTION
-        Checks if SyncThing process is running. If not, starts it.
+        Uses syncthing cli to check if running. Starts if needed.
+        Reads config from SyncThingHome if it exists.
         Returns device ID and GUI address info.
     #>
     param([string]$WorkspaceRoot)
 
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
-
-    # Check if already running
-    $SyncThingProcess = Get-Process syncthing -ErrorAction SilentlyContinue
-    if ($SyncThingProcess) {
-        Write-Host "SyncThing is already running (PID: $($SyncThingProcess.Id))" -ForegroundColor Green
-
-        # Get existing config
-        $ApiKey = Get-SyncThingGuiApiKey -SyncThingHome $SyncThingHome
-        if (-not $ApiKey) {
-            Write-Warning "Could not read SyncThing API key from config"
-            return $null
-        }
-
-        # Try to determine GUI address from config
-        $ConfigPath = Join-Path $SyncThingHome "config.xml"
-        [xml]$Config = Get-Content $ConfigPath
-        $GuiAddress = $Config.configuration.gui.address
-        if (-not $GuiAddress) {
-            $GuiAddress = "127.0.0.1:8384"
-        }
-
-        $DeviceId = Get-SyncThingDeviceId -GuiAddress $GuiAddress -ApiKey $ApiKey
-
-        return @{
-            DeviceId = $DeviceId
-            GuiAddress = $GuiAddress
-            ApiKey = $ApiKey
-        }
-    }
-
-    # Not running - start it
-    Write-Host "Starting SyncThing..." -ForegroundColor Cyan
 
     # Locate syncthing executable
     $SyncThingExe = Get-SyncThingExecutable
@@ -865,58 +789,75 @@ function Ensure-SyncThingRunning {
         Write-Error "Syncthing executable not found. Please ensure Syncthing is installed."
         return $null
     }
-
     Write-Host "Found Syncthing at: $SyncThingExe" -ForegroundColor Gray
 
-    # Find available port
-    $Port = Get-AvailableSyncThingPort
-    $GuiAddress = "127.0.0.1:$Port"
+    # Create home directory if needed
+    if (-not (Test-Path $SyncThingHome)) {
+        New-Item -ItemType Directory -Force -Path $SyncThingHome | Out-Null
+    }
 
-    # Generate random API key
-    $ApiKey = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | ForEach-Object {[char]$_})
+    # Get or generate API key and GUI address from config
+    $ConfigPath = Join-Path $SyncThingHome "config.xml"
+    $ApiKey = $null
+    $GuiAddress = $null
 
-    # Start SyncThing
-    $StartArgs = @(
-        "serve"
-        "--home=$SyncThingHome"
-        "--gui-address=$GuiAddress"
-        "--gui-apikey=$ApiKey"
-        "--no-default-folder"
-        "--unpaused"
-        "--no-upgrade"
-    )
-
-    $StartArgs | Write-Host
-    Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs # -WindowStyle Hidden
-
-    # Wait for GUI to become available
-    $MaxWait = 30
-    $Waited = 0
-    while ($Waited -lt $MaxWait) {
-        Start-Sleep -Seconds 1
-        $Waited++
-
+    if (Test-Path $ConfigPath) {
+        # Read existing config
         try {
-            $Headers = @{ 'X-API-Key' = $ApiKey }
-            Invoke-RestMethod -Uri "http://$GuiAddress/rest/system/ping" -Headers $Headers -Method Get -ErrorAction Stop | Out-Null
-            break
+            [xml]$Config = Get-Content $ConfigPath
+            $ApiKey = $Config.configuration.gui.apikey
+            $GuiAddress = $Config.configuration.gui.address
+            Write-Host "Using existing SyncThing config" -ForegroundColor Gray
         } catch {
-            # Not ready yet
+            Write-Warning "Failed to parse config.xml, generating new config"
         }
     }
 
-    if ($Waited -ge $MaxWait) {
-        Write-Error "SyncThing did not start within $MaxWait seconds"
-        return $null
+    # Generate new config if needed
+    if (-not $ApiKey) {
+        $ApiKey = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | ForEach-Object {[char]$_})
+    }
+    if (-not $GuiAddress) {
+        $Port = Get-AvailableSyncThingPort
+        $GuiAddress = "127.0.0.1:$Port"
     }
 
-    Write-Host "SyncThing started successfully" -ForegroundColor Green
+    # Check if SyncThing is running using CLI
+    $RawAddress = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config gui raw-address get 2>$null
 
-    # Get device ID
-    $DeviceId = Get-SyncThingDeviceId -GuiAddress $GuiAddress -ApiKey $ApiKey
+    if ($LASTEXITCODE -ne 0) {
+        # Not running - start it
+        Write-Host "Starting SyncThing at $GuiAddress..." -ForegroundColor Cyan
 
-    # Launch browser to show SyncThing GUI
-    Start-Process "http://$GuiAddress"
+        $StartArgs = @(
+            "serve"
+            "--home=$SyncThingHome"
+            "--gui-address=$GuiAddress"
+            "--gui-apikey=$ApiKey"
+            "--no-default-folder"
+            "--unpaused"
+            "--no-upgrade"
+        )
+
+        Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs # -WindowStyle Hidden
+        Start-Sleep -Seconds 5
+
+        # Browser will be opened automatically
+        #Start-Process "http://$GuiAddress"
+    } else {
+        Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
+
+        # Open browser to existing instance
+        & $SyncThingExe --browser-only --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey"
+    }
+
+    # Get device ID using CLI
+    $DeviceIdList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config device list 2>$null
+    $DeviceId = $DeviceIdList | Select-Object -First 1
+
+    if (-not $DeviceId) {
+        Write-Warning "Could not retrieve device ID"
+    }
 
     return @{
         DeviceId = $DeviceId
@@ -1032,7 +973,8 @@ function Update-SyncThingDevices {
     .SYNOPSIS
         Adds known devices to SyncThing configuration
     .DESCRIPTION
-        Adds devices from $SyncThingDevices hashtable with auto-accept-folders
+        Queries existing devices and only adds new ones from $SyncThingDevices hashtable
+        Uses syncthing cli to check existing devices before adding
     #>
     param(
         [string]$WorkspaceRoot,
@@ -1055,34 +997,36 @@ function Update-SyncThingDevices {
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     $GuiAddress = $SyncThingInfo.GuiAddress
     $ApiKey = $SyncThingInfo.ApiKey
-    $CurrentDeviceId = $SyncThingInfo.DeviceId
 
+    # Get list of all known device IDs already configured
+    $AllKnownDeviceIds = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>$null
+
+    # Add any new devices that aren't already configured
     foreach ($Device in $Devices.GetEnumerator()) {
         $DeviceName = $Device.Key
         $DeviceId = $Device.Value
 
-        # Skip current device
-        if ($DeviceId -eq $CurrentDeviceId) {
-            continue
+        if ($AllKnownDeviceIds -notcontains $DeviceId) {
+            Write-Host "Adding $DeviceName as SyncThing peer $DeviceId" -ForegroundColor Green
+
+            $CliArgs = @(
+                "cli"
+                "--home=$SyncThingHome"
+                "--gui-address=$GuiAddress"
+                "--gui-apikey=$ApiKey"
+                "config"
+                "devices"
+                "add"
+                "--device-id"
+                $DeviceId
+                "--name"
+                $DeviceName
+                "--auto-accept-folders"
+            )
+            & $SyncThingExe @CliArgs
+        } else {
+            Write-Host "Device $DeviceName ($DeviceId) already configured, skipping" -ForegroundColor Gray
         }
-
-        Write-Host "Adding SyncThing device: $DeviceName ($DeviceId)" -ForegroundColor Cyan
-
-        $CliArgs = @(
-            "cli"
-            "--home=$SyncThingHome"
-            "--gui-address=$GuiAddress"
-            "--gui-apikey=$ApiKey"
-            "config"
-            "devices"
-            "add"
-            "--device-id"
-            $DeviceId
-            "--name"
-            $DeviceName
-            "--auto-accept-folders"
-        )
-        & $SyncThingExe @CliArgs
     }
 
     Write-Host "SyncThing devices configured successfully" -ForegroundColor Green
