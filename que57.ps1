@@ -528,6 +528,82 @@ function New-WindowsShortcut {
     $Shortcut.Save()
 }
 
+function Test-IsAdmin {
+    <#
+    .SYNOPSIS
+        Checks if current process is running as administrator
+    #>
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Install-NetFx3WithElevation {
+    <#
+    .SYNOPSIS
+        Checks and enables .NET Framework 3.5 with automatic elevation
+    .DESCRIPTION
+        Checks if NetFx3 is enabled. If not, attempts to enable it.
+        Automatically elevates if not running as admin.
+    #>
+
+    # Check if already enabled (this doesn't require elevation)
+    try {
+        $NetFx3Feature = Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop
+        if ($NetFx3Feature.State -eq 'Enabled') {
+            Write-Host ".NET Framework 3.5 (NetFx3) is already enabled." -ForegroundColor Green
+            return $true
+        }
+    } catch {
+        # If we can't even check, we definitely need elevation
+    }
+
+    Write-Host "Enabling .NET Framework 3.5 (NetFx3)..." -ForegroundColor Yellow
+
+    # Check if running as admin
+    if (-not (Test-IsAdmin)) {
+        Write-Host "NetFx3 installation requires administrator privileges. Launching elevated process..." -ForegroundColor Yellow
+
+        # Create a script to run elevated
+        $ElevatedScript = {
+            try {
+                Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null
+                Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
+                Read-Host "Press Enter to close this window"
+                exit 0
+            } catch {
+                Write-Error "Failed to enable NetFx3: $($_.Exception.Message)"
+                Read-Host "Press Enter to close this window"
+                exit 1
+            }
+        }
+
+        # Convert scriptblock to base64 to pass to elevated process
+        $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ElevatedScript.ToString()))
+
+        # Start elevated PowerShell process
+        $Process = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-EncodedCommand", $EncodedCommand -Verb RunAs -Wait -PassThru
+
+        if ($Process.ExitCode -eq 0) {
+            Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Warning "Failed to enable NetFx3. You may need to enable it manually."
+            return $false
+        }
+    } else {
+        # Already admin, just run it
+        try {
+            Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null
+            Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
+            return $true
+        } catch {
+            Write-Warning "Failed to enable NetFx3: $($_.Exception.Message)"
+            return $false
+        }
+    }
+}
+
 function Sync-WingetPackage {
     <#
     .SYNOPSIS
@@ -1408,14 +1484,8 @@ function Install-AllDependencies {
     # Install .NET prerequisites
     Sync-WingetPackage -PackageName 'Microsoft.DotNet.Framework.DeveloperPack_4'
 
-    # Handle NetFx3 Windows Feature (special case - not a winget package)
-    $NetFx3Feature = Get-WindowsOptionalFeature -Online -FeatureName NetFx3
-    if ($NetFx3Feature.State -eq 'Enabled') {
-        Write-Host ".NET Framework 3.5 (NetFx3) is already enabled." -ForegroundColor Green
-    } else {
-        Write-Host "Enabling .NET Framework 3.5 (NetFx3)..." -ForegroundColor Yellow
-        Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart | Out-Null
-    }
+    # Handle NetFx3 Windows Feature (requires elevation)
+    Install-NetFx3WithElevation | Out-Null
 
     # Set up LFS before installing GitHub.GitLFS
     & (where.exe git) lfs install | Out-Null
