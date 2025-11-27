@@ -651,6 +651,49 @@ function Get-UserSelectionIndex {
 # SyncThing Helper Functions
 # ----------------------------------------------------------------------------
 
+function Get-SyncThingExecutable {
+    <#
+    .SYNOPSIS
+        Locates the Syncthing executable
+    .DESCRIPTION
+        Tries multiple methods to find syncthing.exe:
+        1. Check PATH using where.exe
+        2. Check common winget install locations
+        3. Check standard program files locations
+    #>
+
+    # Try using where.exe first
+    $WherePath = & where.exe syncthing 2>$null | Select-Object -First 1
+    if ($WherePath -and (Test-Path $WherePath)) {
+        return $WherePath
+    }
+
+    # Check winget package location
+    $WingetPackages = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
+    if (Test-Path $WingetPackages) {
+        $SyncthingDirs = Get-ChildItem -Path $WingetPackages -Filter "Syncthing.Syncthing*" -Directory -ErrorAction SilentlyContinue
+        foreach ($Dir in $SyncthingDirs) {
+            $ExePath = Get-ChildItem -Path $Dir.FullName -Filter "syncthing.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($ExePath) {
+                return $ExePath.FullName
+            }
+        }
+    }
+
+    # Check Program Files
+    $ProgramFilesPaths = @(
+        "$env:ProgramFiles\Syncthing\syncthing.exe",
+        "${env:ProgramFiles(x86)}\Syncthing\syncthing.exe"
+    )
+    foreach ($Path in $ProgramFilesPaths) {
+        if (Test-Path $Path) {
+            return $Path
+        }
+    }
+
+    return $null
+}
+
 function Get-SyncThingGuiApiKey {
     <#
     .SYNOPSIS
@@ -740,6 +783,15 @@ function Ensure-SyncThingRunning {
     # Not running - start it
     Write-Host "Starting SyncThing..." -ForegroundColor Cyan
 
+    # Locate syncthing executable
+    $SyncThingExe = Get-SyncThingExecutable
+    if (-not $SyncThingExe) {
+        Write-Error "Syncthing executable not found. Please ensure Syncthing is installed."
+        return $null
+    }
+
+    Write-Host "Found Syncthing at: $SyncThingExe" -ForegroundColor Gray
+
     # Find available port
     $Port = Get-AvailableSyncThingPort
     $GuiAddress = "127.0.0.1:$Port"
@@ -758,7 +810,7 @@ function Ensure-SyncThingRunning {
         "--no-upgrade"
     )
 
-    Start-Process -FilePath 'syncthing' -ArgumentList $StartArgs -WindowStyle Hidden
+    Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs -WindowStyle Hidden
 
     # Wait for GUI to become available
     $MaxWait = 30
@@ -836,6 +888,13 @@ function Configure-SyncThingFolders {
         [hashtable]$SyncThingInfo
     )
 
+    # Locate syncthing executable
+    $SyncThingExe = Get-SyncThingExecutable
+    if (-not $SyncThingExe) {
+        Write-Error "Syncthing executable not found"
+        return
+    }
+
     $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     $GuiAddress = $SyncThingInfo.GuiAddress
@@ -863,7 +922,7 @@ function Configure-SyncThingFolders {
         $LfsPath
         "--ignore-delete"
     )
-    & syncthing @CliArgs
+    & $SyncThingExe @CliArgs
 
     # Add depot folder (bidirectional)
     $DepotPath = Join-Path $WorkspaceRoot "sync\depot"
@@ -886,7 +945,7 @@ function Configure-SyncThingFolders {
         "--path"
         $DepotPath
     )
-    & syncthing @CliArgs
+    & $SyncThingExe @CliArgs
 
     Write-Host "SyncThing folders configured successfully" -ForegroundColor Green
 }
@@ -906,6 +965,13 @@ function Update-SyncThingDevices {
 
     if ($Devices.Count -eq 0) {
         Write-Host "No additional devices to configure" -ForegroundColor Yellow
+        return
+    }
+
+    # Locate syncthing executable
+    $SyncThingExe = Get-SyncThingExecutable
+    if (-not $SyncThingExe) {
+        Write-Error "Syncthing executable not found"
         return
     }
 
@@ -939,7 +1005,7 @@ function Update-SyncThingDevices {
             $DeviceName
             "--auto-accept-folders"
         )
-        & syncthing @CliArgs
+        & $SyncThingExe @CliArgs
     }
 
     Write-Host "SyncThing devices configured successfully" -ForegroundColor Green
