@@ -810,7 +810,8 @@ function Ensure-SyncThingRunning {
         "--no-upgrade"
     )
 
-    Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs -WindowStyle Hidden
+    $StartArgs | Write-Host
+    Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs # -WindowStyle Hidden
 
     # Wait for GUI to become available
     $MaxWait = 30
@@ -1462,20 +1463,16 @@ function Install-AllDependencies {
         Write-Host "Unreal Engine 5.7 is installed at: $UEInstallPath" -ForegroundColor Green
     } else {
         Write-Host "Unreal Engine 5.7 is not installed." -ForegroundColor Yellow
-        Write-Host "Please install it using the Epic Games Launcher." -ForegroundColor Yellow
-        Write-Host "You can continue setup now and install UE later." -ForegroundColor Yellow
+        Write-Host "Please install it using the Epic Games Launcher" -ForegroundColor Yellow
 
-        $Response = Read-Host "Open Epic Games Launcher to install UE 5.7? (Y/n)"
-        if ($Response -notmatch '^n') {
-            # Try to launch Epic Games Launcher
-            $LauncherPath = Get-EpicGamesLauncherExecutable
-            if ($LauncherPath) {
-                Write-Host "Launching Epic Games Launcher from: $LauncherPath" -ForegroundColor Gray
-                Start-Process $LauncherPath -ArgumentList "-openueversion=5.7"
-            } else {
-                Write-Warning "Could not locate Epic Games Launcher executable"
-                Write-Host "Please open Epic Games Launcher manually and install Unreal Engine 5.7" -ForegroundColor Yellow
-            }
+        # Try to launch Epic Games Launcher
+        $LauncherPath = Get-EpicGamesLauncherExecutable
+        if ($LauncherPath) {
+            Write-Host "Launching Epic Games Launcher from: $LauncherPath" -ForegroundColor Gray
+            Start-Process $LauncherPath -ArgumentList "-openueversion=5.7"
+        } else {
+            Write-Warning "Could not locate Epic Games Launcher executable"
+            Write-Host "Please open Epic Games Launcher manually and install Unreal Engine 5.7" -ForegroundColor Yellow
         }
 
         Write-Host "Continuing setup (UE will be required before opening the project)..." -ForegroundColor Yellow
@@ -1605,7 +1602,7 @@ function New-QueWorkspace {
     } catch {
         if ($_.Exception.Response.StatusCode -eq 404) {
             $RepoExists = $false
-            Write-Host "`nRepository $GitHubOwner/$GitHubRepo does not exist on GitHub" -ForegroundColor Yellow
+            Write-Host "`nRepository $GitHubOwner/$GitHubRepo does not exist on GitHub and will be created"
         } else {
             Write-Error "Failed to check if repository exists: $($_.Exception.Message)"
             return
