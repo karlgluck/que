@@ -912,18 +912,22 @@ function Ensure-SyncThingRunning {
             "--home=$SyncThingHome"
             "--gui-address=$GuiAddress"
             "--gui-apikey=$ApiKey"
-            #"--no-default-folder" # this parameter appears to have been removed in recent versions; unfortunately, it now causes an error rather than being ignored
             "--unpaused"
             "--no-upgrade"
         )
 
         Write-Host "$StartArgs"
-        #Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs # -WindowStyle Hidden
-        & $SyncThingExe @StartArgs
+
+        # Start SyncThing
+        # Browser will be opened automatically
+        $StartProcessArgs = @{
+            FilePath = $SyncThingExe
+            ArgumentList = $StartArgs
+            WindowStyle = 'Hidden'
+        }
+        StartProcess @StartProcessArgs
         Start-Sleep -Seconds 5
 
-        # Browser will be opened automatically
-        #Start-Process "http://$GuiAddress"
     } else {
         Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
 
