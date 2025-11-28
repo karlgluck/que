@@ -165,7 +165,7 @@ To set up your development environment and join this project:
 3. Run this command in PowerShell:
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr $AuthHeaders = @{Authorization = @("token", $quePlainPAT = Read-Host 'Enter Personal Access Token') -join ' '"} ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
 ```
 
 3. Follow the prompts to:
@@ -936,7 +936,7 @@ function Ensure-SyncThingRunning {
     }
 
     # Get device ID using CLI
-    $DeviceIdList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config device list 2>$null
+    $DeviceIdList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>$null
     $DeviceId = $DeviceIdList | Select-Object -First 1
 
     if (-not $DeviceId) {
@@ -1081,7 +1081,7 @@ function Update-SyncThingDevices {
         $DeviceName = $Device.Key
         $DeviceId = $Device.Value
 
-        if ($AllKnownDeviceIds -notcontains $DeviceId) {
+        if ($DeviceId -and $AllKnownDeviceIds -notcontains $DeviceId) {
             Write-Host "Adding $DeviceName as SyncThing peer $DeviceId" -ForegroundColor Green
 
             $CliArgs = @(
@@ -2420,7 +2420,7 @@ function Invoke-QueMain {
         
             # Ensure current device is in SyncThing devices list
             $CurrentDeviceId = $SyncThingInfo.DeviceId
-            if ($SyncThingDevices -and -not $SyncThingDevices.ContainsValue($CurrentDeviceId)) {
+            if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $SyncThingDevices -and (-not $SyncThingDevices.ContainsValue($CurrentDeviceId))) {
                 Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
 
                 # Add to dictionary
