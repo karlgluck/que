@@ -728,6 +728,44 @@ function Get-UserSelectionIndex {
     }
 }
 
+function Get-EpicGamesLauncherExecutable {
+
+    # Check standard installation paths first
+    $StandardPaths = @(
+        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe',
+        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win32\EpicGamesLauncher.exe',
+        'C:\Program Files\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
+    )
+    foreach ($Path in $StandardPaths) {
+        if (Test-Path $Path) {
+            return $Path
+        }
+    }
+
+    # Check winget package location
+    $WingetPackages = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
+    if (Test-Path $WingetPackages) {
+        $EpicDirs = Get-ChildItem -Path $WingetPackages -Filter "EpicGames.EpicGamesLauncher*" -Directory -ErrorAction SilentlyContinue
+        foreach ($Dir in $EpicDirs) {
+            $ExePath = Get-ChildItem -Path $Dir.FullName -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($ExePath) {
+                return $ExePath.FullName
+            }
+        }
+    }
+
+    # Check user's local Programs folder
+    $LocalPrograms = "$env:LOCALAPPDATA\Programs\Epic Games"
+    if (Test-Path $LocalPrograms) {
+        $ExePath = Get-ChildItem -Path $LocalPrograms -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ExePath) {
+            return $ExePath.FullName
+        }
+    }
+
+    return $null
+}
+
 # ----------------------------------------------------------------------------
 # SyncThing Helper Functions
 # ----------------------------------------------------------------------------
@@ -1631,43 +1669,6 @@ function New-QueClone {
 # Unreal Engine Helper Functions
 # ----------------------------------------------------------------------------
 
-function Get-EpicGamesLauncherExecutable {
-
-    # Check standard installation paths first
-    $StandardPaths = @(
-        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe',
-        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win32\EpicGamesLauncher.exe',
-        'C:\Program Files\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
-    )
-    foreach ($Path in $StandardPaths) {
-        if (Test-Path $Path) {
-            return $Path
-        }
-    }
-
-    # Check winget package location
-    $WingetPackages = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
-    if (Test-Path $WingetPackages) {
-        $EpicDirs = Get-ChildItem -Path $WingetPackages -Filter "EpicGames.EpicGamesLauncher*" -Directory -ErrorAction SilentlyContinue
-        foreach ($Dir in $EpicDirs) {
-            $ExePath = Get-ChildItem -Path $Dir.FullName -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($ExePath) {
-                return $ExePath.FullName
-            }
-        }
-    }
-
-    # Check user's local Programs folder
-    $LocalPrograms = "$env:LOCALAPPDATA\Programs\Epic Games"
-    if (Test-Path $LocalPrograms) {
-        $ExePath = Get-ChildItem -Path $LocalPrograms -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($ExePath) {
-            return $ExePath.FullName
-        }
-    }
-
-    return $null
-}
 
 function Get-UnrealProjectEngineVersion {
     param([string]$UProjectPath)
