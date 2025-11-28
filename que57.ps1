@@ -1084,332 +1084,6 @@ function Write-UEGitConfigFiles {
     }
 }
 
-# ----------------------------------------------------------------------------
-# Unreal Engine Helper Functions
-# ----------------------------------------------------------------------------
-
-function Get-EpicGamesLauncherExecutable {
-    <#
-    .SYNOPSIS
-        Locates the Epic Games Launcher executable
-    .DESCRIPTION
-        Tries multiple methods to find EpicGamesLauncher.exe:
-        1. Check common installation paths
-        2. Check winget package location
-        3. Check registry
-    #>
-
-    # Check standard installation paths first
-    $StandardPaths = @(
-        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe',
-        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win32\EpicGamesLauncher.exe',
-        'C:\Program Files\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
-    )
-    foreach ($Path in $StandardPaths) {
-        if (Test-Path $Path) {
-            return $Path
-        }
-    }
-
-    # Check winget package location
-    $WingetPackages = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
-    if (Test-Path $WingetPackages) {
-        $EpicDirs = Get-ChildItem -Path $WingetPackages -Filter "EpicGames.EpicGamesLauncher*" -Directory -ErrorAction SilentlyContinue
-        foreach ($Dir in $EpicDirs) {
-            $ExePath = Get-ChildItem -Path $Dir.FullName -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($ExePath) {
-                return $ExePath.FullName
-            }
-        }
-    }
-
-    # Check user's local Programs folder
-    $LocalPrograms = "$env:LOCALAPPDATA\Programs\Epic Games"
-    if (Test-Path $LocalPrograms) {
-        $ExePath = Get-ChildItem -Path $LocalPrograms -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($ExePath) {
-            return $ExePath.FullName
-        }
-    }
-
-    return $null
-}
-
-function Get-UnrealProjectEngineVersion {
-    <#
-    .SYNOPSIS
-        Reads EngineAssociation from .uproject file
-    .DESCRIPTION
-        Works with both .uproject path or directory containing .uproject
-        Returns version string (e.g., "5.7")
-    #>
-    param([string]$UProjectPath)
-
-    if (Test-Path $UProjectPath -PathType Container) {
-        $UProjectPath = Find-UProjectFile -CloneRoot $UProjectPath
-        if (-not $UProjectPath) {
-            throw "No .uproject file found in directory"
-        }
-    }
-
-    $UProjectContent = Get-Content $UProjectPath -Raw | ConvertFrom-Json
-    return $UProjectContent.EngineAssociation
-}
-
-function Get-UnrealEngineDirectory {
-    <#
-    .SYNOPSIS
-        Gets UE installation directory for a project
-    .DESCRIPTION
-        Reads EngineAssociation from .uproject and queries registry
-        Returns installation directory path
-    #>
-    param([string]$UProjectPath)
-
-    $EngineVersion = Get-UnrealProjectEngineVersion -UProjectPath $UProjectPath
-    $RegistryPath = "HKLM:\Software\EpicGames\Unreal Engine\$EngineVersion"
-
-    if (-not (Test-Path $RegistryPath)) {
-        throw "Unreal Engine $EngineVersion is not installed. Install it via Epic Games Launcher."
-    }
-
-    $InstallDir = (Get-ItemProperty -Path $RegistryPath -Name "InstalledDirectory" -ErrorAction Stop).InstalledDirectory
-    if (-not (Test-Path $InstallDir)) {
-        throw "Unreal Engine installation directory not found: $InstallDir"
-    }
-
-    return $InstallDir
-}
-
-function Get-UnrealBuildTool {
-    <#
-    .SYNOPSIS
-        Locates UnrealBuildTool.exe from engine installation
-    .DESCRIPTION
-        Uses Get-UnrealEngineDirectory to find engine path
-        Returns path to UnrealBuildTool.exe
-    #>
-    param([string]$UProjectPath)
-
-    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
-    $UBTPath = Join-Path $EngineDir "Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe"
-
-    if (-not (Test-Path $UBTPath)) {
-        throw "UnrealBuildTool not found at: $UBTPath"
-    }
-
-    return $UBTPath
-}
-
-function Invoke-UnrealGenerate {
-    <#
-    .SYNOPSIS
-        Generates Visual Studio project files for UE project
-    .DESCRIPTION
-        Runs UnrealBuildTool to generate .sln and project files
-    #>
-    param([string]$UProjectPath)
-
-    $UBTPath = Get-UnrealBuildTool -UProjectPath $UProjectPath
-    $ProjectDir = Split-Path $UProjectPath -Parent
-
-    Write-Host "Generating project files..." -ForegroundColor Cyan
-    & $UBTPath -Mode=GenerateProjectFiles -Project="$UProjectPath" -Silent
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Project file generation failed with exit code $LASTEXITCODE"
-    }
-
-    Write-Host "Project files generated successfully" -ForegroundColor Green
-}
-
-function Invoke-UnrealBuild {
-    <#
-    .SYNOPSIS
-        Builds UE project editor target
-    .DESCRIPTION
-        Runs Engine/Build/BatchFiles/Build.bat for Development Editor
-        Returns $true if build succeeds
-    #>
-    param([string]$UProjectPath)
-
-    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
-    $BuildBatchFile = Join-Path $EngineDir "Engine\Build\BatchFiles\Build.bat"
-    $ProjectName = [System.IO.Path]::GetFileNameWithoutExtension($UProjectPath)
-
-    if (-not (Test-Path $BuildBatchFile)) {
-        throw "Build.bat not found at: $BuildBatchFile"
-    }
-
-    Write-Host "Building $ProjectName Editor (Development Win64)..." -ForegroundColor Cyan
-    & $BuildBatchFile "${ProjectName}Editor" Win64 Development "-Project=`"$UProjectPath`"" -Progress -NoEngineChanges -NoHotReloadFromIDE
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Build failed with exit code $LASTEXITCODE"
-        return $false
-    }
-
-    Write-Host "Build completed successfully" -ForegroundColor Green
-    return $true
-}
-
-function Invoke-UnrealEditor {
-    <#
-    .SYNOPSIS
-        Launches UE editor with .uproject file
-    .DESCRIPTION
-        Finds UnrealEditor.exe and launches it in background
-    #>
-    param([string]$UProjectPath)
-
-    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
-    $EditorPath = Join-Path $EngineDir "Engine\Binaries\Win64\UnrealEditor.exe"
-
-    if (-not (Test-Path $EditorPath)) {
-        throw "UnrealEditor.exe not found at: $EditorPath"
-    }
-
-    Write-Host "Launching Unreal Editor..." -ForegroundColor Cyan
-    Start-Process -FilePath $EditorPath -ArgumentList "`"$UProjectPath`"" -WorkingDirectory (Split-Path $UProjectPath -Parent)
-
-    Write-Host "Editor launched" -ForegroundColor Green
-}
-
-function Invoke-UnrealClean {
-    <#
-    .SYNOPSIS
-        Cleans UE project build artifacts
-    .DESCRIPTION
-        Tries Clean.bat if available, otherwise manually deletes folders
-    #>
-    param([string]$UProjectPath)
-
-    $ProjectDir = Split-Path $UProjectPath -Parent
-    $ProjectName = [System.IO.Path]::GetFileNameWithoutExtension($UProjectPath)
-
-    try {
-        $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
-        $CleanBatchFile = Join-Path $EngineDir "Engine\Build\BatchFiles\Clean.bat"
-
-        if (Test-Path $CleanBatchFile) {
-            Write-Host "Running Clean.bat..." -ForegroundColor Cyan
-            & $CleanBatchFile $ProjectName Win64 Development
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "Clean completed successfully" -ForegroundColor Green
-                return
-            }
-            Write-Warning "Clean.bat failed, falling back to manual cleanup"
-        }
-    } catch {
-        Write-Warning "Could not run Clean.bat: $($_.Exception.Message)"
-    }
-
-    # Manual cleanup
-    Write-Host "Performing manual cleanup..." -ForegroundColor Cyan
-
-    $FoldersToDelete = @("Binaries", "Intermediate", "Saved", "DerivedDataCache")
-    foreach ($Folder in $FoldersToDelete) {
-        $FolderPath = Join-Path $ProjectDir $Folder
-        if (Test-Path $FolderPath) {
-            Write-Host "Deleting $Folder..." -ForegroundColor Yellow
-            Remove-Item $FolderPath -Recurse -Force
-        }
-    }
-
-    # Delete generated .sln files
-    $SlnFiles = Get-ChildItem -Path (Split-Path $ProjectDir -Parent) -Filter "*.sln" -ErrorAction SilentlyContinue
-    foreach ($SlnFile in $SlnFiles) {
-        Write-Host "Deleting $($SlnFile.Name)..." -ForegroundColor Yellow
-        Remove-Item $SlnFile.FullName -Force
-    }
-
-    Write-Host "Clean completed. Next build will be a full rebuild." -ForegroundColor Green
-}
-
-function Invoke-UnrealPackage {
-    <#
-    .SYNOPSIS
-        Packages UE project for distribution
-    .DESCRIPTION
-        Builds client and server targets using RunUAT BuildCookRun
-        Returns package paths and configuration
-    #>
-    param([string]$UProjectPath)
-
-    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
-    $RunUATPath = Join-Path $EngineDir "Engine\Build\BatchFiles\RunUAT.bat"
-    $ProjectDir = Split-Path $UProjectPath -Parent
-    $ProjectName = [System.IO.Path]::GetFileNameWithoutExtension($UProjectPath)
-
-    if (-not (Test-Path $RunUATPath)) {
-        throw "RunUAT.bat not found at: $RunUATPath"
-    }
-
-    # Prompt for build configuration
-    Write-Host "`nSelect build configuration:" -ForegroundColor Yellow
-    Write-Host "1. Development" -ForegroundColor White
-    Write-Host "2. Shipping" -ForegroundColor White
-    Write-Host "3. DebugGame" -ForegroundColor White
-
-    $Selection = Read-Host "Enter selection (1-3)"
-    $BuildConfig = switch ($Selection) {
-        "1" { "Development" }
-        "2" { "Shipping" }
-        "3" { "DebugGame" }
-        default {
-            Write-Warning "Invalid selection, using Development"
-            "Development"
-        }
-    }
-
-    Write-Host "Using configuration: $BuildConfig" -ForegroundColor Green
-
-    # Package client
-    Write-Host "`nPackaging client build ($BuildConfig)..." -ForegroundColor Cyan
-    & $RunUATPath BuildCookRun `
-        -project="$UProjectPath" `
-        -nop4 `
-        -platform=Win64 `
-        -clientconfig=$BuildConfig `
-        -cook `
-        -allmaps `
-        -build `
-        -stage `
-        -pak `
-        -archive `
-        -archivedirectory="$ProjectDir\Saved\Packages\$BuildConfig\Client"
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Client package failed with exit code $LASTEXITCODE"
-    }
-
-    # Package server
-    Write-Host "`nPackaging server build ($BuildConfig)..." -ForegroundColor Cyan
-    & $RunUATPath BuildCookRun `
-        -project="$UProjectPath" `
-        -nop4 `
-        -platform=Win64 `
-        -serverconfig=$BuildConfig `
-        -server `
-        -noclient `
-        -cook `
-        -allmaps `
-        -build `
-        -stage `
-        -pak `
-        -archive `
-        -archivedirectory="$ProjectDir\Saved\Packages\$BuildConfig\Server"
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Server package failed (project may not have server target)"
-    }
-
-    return @{
-        Configuration = $BuildConfig
-        Client = "$ProjectDir\Saved\Packages\$BuildConfig\Client"
-        Server = "$ProjectDir\Saved\Packages\$BuildConfig\Server"
-    }
-}
 
 function Install-AllDependencies {
     <#
@@ -1511,6 +1185,7 @@ function New-QueRepoScript {
         [string]$SyncThingDeviceId = ""
     )
 
+    $ThreeHashes = '###'
     $OutputPath = "$CloneRoot\que-$Repo.ps1"
 
     # Start with the source script
@@ -1518,17 +1193,16 @@ function New-QueRepoScript {
 
     # 1. Update constants section
     $ConstantsBlock = @"
-{0}QUE_CONSTANTS_BEGIN{0}
+$($ThreeHashes)QUE_CONSTANTS_BEGIN$($ThreeHashes)
 `$UnrealEngineVersion = "5.7"
 `$GitHubOwner = "$Owner"
 `$GitHubRepo = "$Repo"
-{0}QUE_CONSTANTS_END{0}
-"@ -f @('###')
+$($ThreeHashes)QUE_CONSTANTS_END$($ThreeHashes)
+"@
 
     $ScriptContent = $ScriptContent -replace ('{0}QUE_CONSTANTS_BEGIN{0}[\s\S]*?{0}QUE_CONSTANTS_END{0}' -f @('###')), $ConstantsBlock
 
     # 2. Add SyncThing devices section (initially just this device if provided)
-    $ThreeHashes = '###'
     if ($SyncThingDeviceId) {
         $SyncThingBlock = @"
 $($ThreeHashes)QUE_SYNCTHING_BEGIN$($ThreeHashes)
@@ -1552,21 +1226,8 @@ $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
     $ScriptContent = $ScriptContent -replace ('{0}QUE_EMBEDDED_FILES_BEGIN{0}[\s\S]*?{0}QUE_EMBEDDED_FILES_END{0}' -f @($ThreeHashes)), ''
 
     # 4. Uncomment management mode code
-    $MatchExpression = '{0}QUE_MANAGEMENT_MODE_BEGIN{0}([\s\S]*?){0}QUE_MANAGEMENT_MODE_END{0}' -f @('###')
-    if ($ScriptContent -match $MatchExpression) {
-        $ManagementCode = $Matches[1]
-        # Remove comment markers (lines starting with # followed by space)
-        $UncommentedCode = $ManagementCode -replace '(?m)^# ', ''
-        $ScriptContent = $ScriptContent -replace $MatchExpression, "$($ThreeHashes)QUE_MANAGEMENT_MODE_BEGIN$($ThreeHashes)`n$UncommentedCode`n$($ThreeHashes)QUE_MANAGEMENT_MODE_END$($ThreeHashes)"
-    }
-
-    # 5. Uncomment direct execution mode code
-    $MatchExpression = '{0}QUE_DIRECT_EXEC_BEGIN{0}([\s\S]*?){0}QUE_DIRECT_EXEC_END{0}' -f @('###')
-    if ($ScriptContent -match $MatchExpression) {
-        $DirectExecCode = $Matches[1]
-        $UncommentedCode = $DirectExecCode -replace '(?m)^# ', ''
-        $ScriptContent = $ScriptContent -replace $MatchExpression, "$($ThreeHashes)QUE_DIRECT_EXEC_BEGIN$($ThreeHashes)`n$UncommentedCode`n$($ThreeHashes)QUE_DIRECT_EXEC_END$($ThreeHashes)"
-    }
+    $ScriptContent = ScriptContent -replace ('<#{0}QUE_MANAGEMENT_MODE_BEGIN{0}' -f @($ThreeHashes))
+    $ScriptContent = ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes))
 
     # Write the generated script
     Set-Content -Path $OutputPath -Value $ScriptContent -Encoding UTF8
@@ -1938,374 +1599,640 @@ function New-QueClone {
 # ----------------------------------------------------------------------------
 # MANAGEMENT COMMANDS (commented out in que57.ps1, active in que-repo-name.ps1)
 # ----------------------------------------------------------------------------
-###QUE_MANAGEMENT_MODE_BEGIN###
-# function Open-UnrealProject {
-#     Write-Host "`nOpening Unreal Engine project..." -ForegroundColor Cyan
-#
-#     # Find .uproject file
-#     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
-#     if (-not $UProjectPath) {
-#         Write-Error "No .uproject file found. Please create your Unreal project first."
-#         return
-#     }
-#
-#     # Generate project files
-#     Write-Host "Generating project files..."
-#     try {
-#         Invoke-UnrealGenerate -UProjectPath $UProjectPath
-#     } catch {
-#         Write-Error "Project file generation failed: $($_.Exception.Message)"
-#         return
-#     }
-#
-#     # Build editor
-#     Write-Host "Building editor..."
-#     try {
-#         $BuildSuccess = Invoke-UnrealBuild -UProjectPath $UProjectPath
-#         if (-not $BuildSuccess) {
-#             Write-Error "Build failed. Check output above for errors."
-#             return
-#         }
-#     } catch {
-#         Write-Error "Build failed: $($_.Exception.Message)"
-#         return
-#     }
-#
-#     # Launch editor
-#     Write-Host "Launching Unreal Editor..."
-#     try {
-#         Invoke-UnrealEditor -UProjectPath $UProjectPath
-#         Write-Host "Editor launched successfully!" -ForegroundColor Green
-#     } catch {
-#         Write-Error "Failed to launch editor: $($_.Exception.Message)"
-#     }
-# }
-#
-# function Build-UnrealProject {
-#     Write-Host "`nBuilding Unreal Engine project..." -ForegroundColor Cyan
-#
-#     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
-#     if (-not $UProjectPath) {
-#         Write-Error "No .uproject file found."
-#         return
-#     }
-#
-#     # Generate project files
-#     Write-Host "Generating project files..."
-#     try {
-#         Invoke-UnrealGenerate -UProjectPath $UProjectPath
-#     } catch {
-#         Write-Error "Project file generation failed: $($_.Exception.Message)"
-#         return
-#     }
-#
-#     # Build editor
-#     Write-Host "Building editor..."
-#     try {
-#         $BuildSuccess = Invoke-UnrealBuild -UProjectPath $UProjectPath
-#         if ($BuildSuccess) {
-#             Write-Host "Build completed successfully!" -ForegroundColor Green
-#         } else {
-#             Write-Error "Build failed."
-#         }
-#     } catch {
-#         Write-Error "Build failed: $($_.Exception.Message)"
-#     }
-# }
-#
-# function Clean-UnrealProject {
-#     Write-Host "`nCleaning Unreal Engine project..." -ForegroundColor Cyan
-#
-#     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
-#     if (-not $UProjectPath) {
-#         Write-Error "No .uproject file found."
-#         return
-#     }
-#
-#     try {
-#         Invoke-UnrealClean -UProjectPath $UProjectPath
-#     } catch {
-#         Write-Error "Clean failed: $($_.Exception.Message)"
-#     }
-# }
-#
-# function Pull-FromGitHub {
-#     Write-Host "`nPulling from GitHub..." -ForegroundColor Cyan
-#
-#     Push-Location $CloneRoot
-#
-#     # Check current branch
-#     $CurrentBranch = git rev-parse --abbrev-ref HEAD
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "Failed to get current branch"
-#         return
-#     }
-#
-#     if ($CurrentBranch -ne "main") {
-#         Write-Error "Not on main branch (currently on $CurrentBranch). Switch to main first."
-#         Pop-Location
-#         return
-#     }
-#
-#     # Stash changes
-#     Write-Host "Stashing local changes..."
-#     git stash push -m "QUE auto-stash $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-#
-#     # Pull from remote
-#     Write-Host "Pulling from origin/main..."
-#     git pull origin main
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "git pull failed with exit code $LASTEXITCODE"
-#         Write-Host "Your stashed changes are safe. Run 'git stash list' to see them." -ForegroundColor Yellow
-#         return
-#     }
-#
-#     # Restore stashed changes
-#     Write-Host "Restoring stashed changes..."
-#     $StashList = git stash list
-#     if ($StashList) {
-#         git stash pop
-#         if ($LASTEXITCODE -ne 0) {
-#             Write-Warning "Stash pop had conflicts or failed."
-#             Write-Host "`nTo resolve conflicts:" -ForegroundColor Yellow
-#             Write-Host "  1. Fix conflicts in affected files" -ForegroundColor Yellow
-#             Write-Host "  2. Run: git add <resolved-files>" -ForegroundColor Yellow
-#             Write-Host "  3. Run: git stash drop" -ForegroundColor Yellow
-#             Write-Host "`nYour stashed changes are safe and can be recovered with: git stash apply" -ForegroundColor Yellow
-#             Pop-Location
-#             return
-#         }
-#         Write-Host "Note: Changes remain in stash for manual recovery if needed. Use 'git stash drop' to remove." -ForegroundColor Yellow
-#     }
-#
-#     Pop-Location
-#     Write-Host "Pull completed!" -ForegroundColor Green
-# }
-#
-# function Push-ToGitHub {
-#     Write-Host "`nPushing to GitHub..." -ForegroundColor Cyan
-#
-#     Push-Location $CloneRoot
-#
-#     # Check current branch
-#     $CurrentBranch = git rev-parse --abbrev-ref HEAD
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "Failed to get current branch"
-#         return
-#     }
-#
-#     if ($CurrentBranch -ne "main") {
-#         Write-Error "Not on main branch (currently on $CurrentBranch). Switch to main first."
-#         Pop-Location
-#         return
-#     }
-#
-#     # Create temporary branch
-#     $TempBranch = "que-push-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-#     Write-Host "Creating branch: $TempBranch"
-#     git checkout -b $TempBranch
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "Failed to create temporary branch"
-#         return
-#     }
-#
-#     # Commit all changes
-#     Write-Host "Committing all changes..."
-#     git add -A
-#     if ($LASTEXITCODE -ne 0) {
-#         git checkout main
-#         git branch -D $TempBranch
-#         Pop-Location
-#         Write-Error "git add failed"
-#         return
-#     }
-#
-#     $CommitMessage = Read-Host "Enter commit message"
-#     if ([string]::IsNullOrWhiteSpace($CommitMessage)) {
-#         $CommitMessage = "QUE auto-commit $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-#     }
-#     git commit -m $CommitMessage
-#     if ($LASTEXITCODE -ne 0) {
-#         git checkout main
-#         git branch -D $TempBranch
-#         Pop-Location
-#         Write-Error "git commit failed (nothing to commit?)"
-#         return
-#     }
-#
-#     # Fetch and rebase on main
-#     Write-Host "Fetching latest from origin..."
-#     git fetch origin
-#     if ($LASTEXITCODE -ne 0) {
-#         git checkout main
-#         git branch -D $TempBranch
-#         Pop-Location
-#         Write-Error "git fetch failed"
-#         return
-#     }
-#
-#     Write-Host "Rebasing on origin/main..."
-#     git rebase origin/main
-#     if ($LASTEXITCODE -ne 0) {
-#         Write-Error "Rebase failed. Aborting push. Resolve conflicts manually."
-#         git rebase --abort
-#         git checkout main
-#         git branch -D $TempBranch
-#         Pop-Location
-#         return
-#     }
-#
-#     # Push branch
-#     Write-Host "Pushing branch to origin..."
-#     git push -u origin $TempBranch
-#     if ($LASTEXITCODE -ne 0) {
-#         git checkout main
-#         git branch -D $TempBranch
-#         Pop-Location
-#         Write-Error "git push failed"
-#         return
-#     }
-#
-#     # Switch to main
-#     Write-Host "Switching to main..."
-#     git checkout main
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "Failed to switch to main"
-#         return
-#     }
-#
-#     # Pull latest main
-#     git pull origin main
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "Failed to pull latest main"
-#         return
-#     }
-#
-#     # Merge temp branch
-#     Write-Host "Merging $TempBranch into main..."
-#     git merge $TempBranch --no-ff -m "Merge $TempBranch"
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "Merge failed"
-#         return
-#     }
-#
-#     # Push main
-#     Write-Host "Pushing main to origin..."
-#     git push origin main
-#     if ($LASTEXITCODE -ne 0) {
-#         Pop-Location
-#         Write-Error "Failed to push main"
-#         return
-#     }
-#
-#     # Delete temp branch (locally and remotely)
-#     Write-Host "Cleaning up temporary branch..."
-#     git branch -d $TempBranch
-#     git push origin --delete $TempBranch 2>$null
-#     if ($LASTEXITCODE -ne 0) {
-#         Write-Warning "Failed to delete remote branch (may have been deleted already)"
-#     }
-#
-#     Pop-Location
-#     Write-Host "Push completed!" -ForegroundColor Green
-# }
-#
-# function Package-UnrealProject {
-#     Write-Host "`nPackaging Unreal Engine project..." -ForegroundColor Cyan
-#
-#     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
-#     if (-not $UProjectPath) {
-#         Write-Error "No .uproject file found."
-#         return
-#     }
-#
-#     try {
-#         $PackageResult = Invoke-UnrealPackage -UProjectPath $UProjectPath
-#
-#         if ($PackageResult) {
-#             Write-Host "`nPackaging complete ($($PackageResult.Configuration))!" -ForegroundColor Green
-#             if ($PackageResult.Client) {
-#                 Write-Host "Client package: $($PackageResult.Client)"
-#             }
-#             if ($PackageResult.Server) {
-#                 Write-Host "Server package: $($PackageResult.Server)"
-#             }
-#         }
-#     } catch {
-#         Write-Error "Packaging failed: $($_.Exception.Message)"
-#     }
-# }
-#
-# function Show-WorkspaceInfo {
-#     Write-Host "`n===============================================================" -ForegroundColor Cyan
-#     Write-Host "  QUE Workspace Information" -ForegroundColor Green
-#     Write-Host "===============================================================" -ForegroundColor Cyan
-#
-#     # Workspace info
-#     Write-Host "`nWorkspace:" -ForegroundColor Yellow
-#     Write-Host "  Root: $WorkspaceRoot"
-#     Write-Host "  Version: $(Get-Content "$WorkspaceRoot\.que\workspace-version" -ErrorAction SilentlyContinue)"
-#
-#     # Clone info
-#     Write-Host "`nClone:" -ForegroundColor Yellow
-#     Write-Host "  Name: $CloneName"
-#     Write-Host "  Root: $CloneRoot"
-#     $RepoVersion = Get-Content "$WorkspaceRoot\.que\repo\$CloneName\repo-version" -ErrorAction SilentlyContinue
-#     Write-Host "  Version: $(if ($RepoVersion) { $RepoVersion } else { 'Not set' })"
-#
-#     # GitHub info
-#     Write-Host "`nGitHub:" -ForegroundColor Yellow
-#     Write-Host "  Repository: $GitHubOwner/$GitHubRepo"
-#
-#     Push-Location $CloneRoot
-#     $GitUser = git config user.name
-#     if ($LASTEXITCODE -eq 0) {
-#         $GitEmail = git config user.email
-#         $GitBranch = git rev-parse --abbrev-ref HEAD 2>$null
-#         if ($LASTEXITCODE -eq 0) {
-#             Write-Host "  User: $GitUser <$GitEmail>"
-#             Write-Host "  Branch: $GitBranch"
-#         } else {
-#             Write-Host "  User: $GitUser <$GitEmail>"
-#             Write-Host "  Branch: (unable to determine)"
-#         }
-#     }
-#     Pop-Location
-#
-#     # Unreal project info
-#     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
-#     if ($UProjectPath) {
-#         Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
-#         Write-Host "  Project: $UProjectPath"
-#         Write-Host "  Version: $UnrealEngineVersion"
-#     } else {
-#         Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
-#         Write-Host "  No .uproject file found"
-#     }
-#
-#     # SyncThing info
-#     Write-Host "`nSyncThing:" -ForegroundColor Yellow
-#     $SyncThingRunning = Get-Process syncthing -ErrorAction SilentlyContinue
-#     if ($SyncThingRunning) {
-#         Write-Host "  Status: Running"
-#         Write-Host "  Devices: $($SyncThingDevices.Count)"
-#         foreach ($Device in $SyncThingDevices.GetEnumerator()) {
-#             Write-Host "    - $($Device.Key): $($Device.Value)"
-#         }
-#     } else {
-#         Write-Host "  Status: Not running"
-#     }
-#
-#     Write-Host "`n===============================================================`n" -ForegroundColor Cyan
-# }
-###QUE_MANAGEMENT_MODE_END###
+<####QUE_MANAGEMENT_MODE_BEGIN###
+
+# ----------------------------------------------------------------------------
+# Unreal Engine Helper Functions
+# ----------------------------------------------------------------------------
+
+function Get-EpicGamesLauncherExecutable {
+
+    # Check standard installation paths first
+    $StandardPaths = @(
+        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe',
+        'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win32\EpicGamesLauncher.exe',
+        'C:\Program Files\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
+    )
+    foreach ($Path in $StandardPaths) {
+        if (Test-Path $Path) {
+            return $Path
+        }
+    }
+
+    # Check winget package location
+    $WingetPackages = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
+    if (Test-Path $WingetPackages) {
+        $EpicDirs = Get-ChildItem -Path $WingetPackages -Filter "EpicGames.EpicGamesLauncher*" -Directory -ErrorAction SilentlyContinue
+        foreach ($Dir in $EpicDirs) {
+            $ExePath = Get-ChildItem -Path $Dir.FullName -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($ExePath) {
+                return $ExePath.FullName
+            }
+        }
+    }
+
+    # Check user's local Programs folder
+    $LocalPrograms = "$env:LOCALAPPDATA\Programs\Epic Games"
+    if (Test-Path $LocalPrograms) {
+        $ExePath = Get-ChildItem -Path $LocalPrograms -Filter "EpicGamesLauncher.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ExePath) {
+            return $ExePath.FullName
+        }
+    }
+
+    return $null
+}
+
+function Get-UnrealProjectEngineVersion {
+    param([string]$UProjectPath)
+
+    if (Test-Path $UProjectPath -PathType Container) {
+        $UProjectPath = Find-UProjectFile -CloneRoot $UProjectPath
+        if (-not $UProjectPath) {
+            throw "No .uproject file found in directory"
+        }
+    }
+
+    $UProjectContent = Get-Content $UProjectPath -Raw | ConvertFrom-Json
+    return $UProjectContent.EngineAssociation
+}
+
+function Get-UnrealEngineDirectory {
+    param([string]$UProjectPath)
+
+    $EngineVersion = Get-UnrealProjectEngineVersion -UProjectPath $UProjectPath
+    $RegistryPath = "HKLM:\Software\EpicGames\Unreal Engine\$EngineVersion"
+
+    if (-not (Test-Path $RegistryPath)) {
+        throw "Unreal Engine $EngineVersion is not installed. Install it via Epic Games Launcher."
+    }
+
+    $InstallDir = (Get-ItemProperty -Path $RegistryPath -Name "InstalledDirectory" -ErrorAction Stop).InstalledDirectory
+    if (-not (Test-Path $InstallDir)) {
+        throw "Unreal Engine installation directory not found: $InstallDir"
+    }
+
+    return $InstallDir
+}
+
+function Get-UnrealBuildTool {
+    param([string]$UProjectPath)
+
+    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
+    $UBTPath = Join-Path $EngineDir "Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe"
+
+    if (-not (Test-Path $UBTPath)) {
+        throw "UnrealBuildTool not found at: $UBTPath"
+    }
+
+    return $UBTPath
+}
+
+function Invoke-UnrealGenerate {
+    param([string]$UProjectPath)
+
+    $UBTPath = Get-UnrealBuildTool -UProjectPath $UProjectPath
+    $ProjectDir = Split-Path $UProjectPath -Parent
+
+    Write-Host "Generating project files..." -ForegroundColor Cyan
+    & $UBTPath -Mode=GenerateProjectFiles -Project="$UProjectPath" -Silent
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Project file generation failed with exit code $LASTEXITCODE"
+    }
+
+    Write-Host "Project files generated successfully" -ForegroundColor Green
+}
+
+function Invoke-UnrealBuild {
+    param([string]$UProjectPath)
+
+    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
+    $BuildBatchFile = Join-Path $EngineDir "Engine\Build\BatchFiles\Build.bat"
+    $ProjectName = [System.IO.Path]::GetFileNameWithoutExtension($UProjectPath)
+
+    if (-not (Test-Path $BuildBatchFile)) {
+        throw "Build.bat not found at: $BuildBatchFile"
+    }
+
+    Write-Host "Building $ProjectName Editor (Development Win64)..." -ForegroundColor Cyan
+    & $BuildBatchFile "${ProjectName}Editor" Win64 Development "-Project=`"$UProjectPath`"" -Progress -NoEngineChanges -NoHotReloadFromIDE
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Build failed with exit code $LASTEXITCODE"
+        return $false
+    }
+
+    Write-Host "Build completed successfully" -ForegroundColor Green
+    return $true
+}
+
+function Invoke-UnrealEditor {
+    param([string]$UProjectPath)
+
+    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
+    $EditorPath = Join-Path $EngineDir "Engine\Binaries\Win64\UnrealEditor.exe"
+
+    if (-not (Test-Path $EditorPath)) {
+        throw "UnrealEditor.exe not found at: $EditorPath"
+    }
+
+    Write-Host "Launching Unreal Editor..." -ForegroundColor Cyan
+    Start-Process -FilePath $EditorPath -ArgumentList "`"$UProjectPath`"" -WorkingDirectory (Split-Path $UProjectPath -Parent)
+
+    Write-Host "Editor launched" -ForegroundColor Green
+}
+
+function Invoke-UnrealClean {
+    param([string]$UProjectPath)
+
+    $ProjectDir = Split-Path $UProjectPath -Parent
+    $ProjectName = [System.IO.Path]::GetFileNameWithoutExtension($UProjectPath)
+
+    try {
+        $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
+        $CleanBatchFile = Join-Path $EngineDir "Engine\Build\BatchFiles\Clean.bat"
+
+        if (Test-Path $CleanBatchFile) {
+            Write-Host "Running Clean.bat..." -ForegroundColor Cyan
+            & $CleanBatchFile $ProjectName Win64 Development
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Clean completed successfully" -ForegroundColor Green
+                return
+            }
+            Write-Warning "Clean.bat failed, falling back to manual cleanup"
+        }
+    } catch {
+        Write-Warning "Could not run Clean.bat: $($_.Exception.Message)"
+    }
+
+    # Manual cleanup
+    Write-Host "Performing manual cleanup..." -ForegroundColor Cyan
+
+    $FoldersToDelete = @("Binaries", "Intermediate", "Saved", "DerivedDataCache")
+    foreach ($Folder in $FoldersToDelete) {
+        $FolderPath = Join-Path $ProjectDir $Folder
+        if (Test-Path $FolderPath) {
+            Write-Host "Deleting $Folder..." -ForegroundColor Yellow
+            Remove-Item $FolderPath -Recurse -Force
+        }
+    }
+
+    # Delete generated .sln files
+    $SlnFiles = Get-ChildItem -Path (Split-Path $ProjectDir -Parent) -Filter "*.sln" -ErrorAction SilentlyContinue
+    foreach ($SlnFile in $SlnFiles) {
+        Write-Host "Deleting $($SlnFile.Name)..." -ForegroundColor Yellow
+        Remove-Item $SlnFile.FullName -Force
+    }
+
+    Write-Host "Clean completed. Next build will be a full rebuild." -ForegroundColor Green
+}
+
+function Invoke-UnrealPackage {
+    param([string]$UProjectPath)
+
+    $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
+    $RunUATPath = Join-Path $EngineDir "Engine\Build\BatchFiles\RunUAT.bat"
+    $ProjectDir = Split-Path $UProjectPath -Parent
+    $ProjectName = [System.IO.Path]::GetFileNameWithoutExtension($UProjectPath)
+
+    if (-not (Test-Path $RunUATPath)) {
+        throw "RunUAT.bat not found at: $RunUATPath"
+    }
+
+    # Prompt for build configuration
+    Write-Host "`nSelect build configuration:" -ForegroundColor Yellow
+    Write-Host "1. Development" -ForegroundColor White
+    Write-Host "2. Shipping" -ForegroundColor White
+    Write-Host "3. DebugGame" -ForegroundColor White
+
+    $Selection = Read-Host "Enter selection (1-3)"
+    $BuildConfig = switch ($Selection) {
+        "1" { "Development" }
+        "2" { "Shipping" }
+        "3" { "DebugGame" }
+        default {
+            Write-Warning "Invalid selection, using Development"
+            "Development"
+        }
+    }
+
+    Write-Host "Using configuration: $BuildConfig" -ForegroundColor Green
+
+    # Package client
+    Write-Host "`nPackaging client build ($BuildConfig)..." -ForegroundColor Cyan
+    & $RunUATPath BuildCookRun `
+        -project="$UProjectPath" `
+        -nop4 `
+        -platform=Win64 `
+        -clientconfig=$BuildConfig `
+        -cook `
+        -allmaps `
+        -build `
+        -stage `
+        -pak `
+        -archive `
+        -archivedirectory="$ProjectDir\Saved\Packages\$BuildConfig\Client"
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Client package failed with exit code $LASTEXITCODE"
+    }
+
+    # Package server
+    Write-Host "`nPackaging server build ($BuildConfig)..." -ForegroundColor Cyan
+    & $RunUATPath BuildCookRun `
+        -project="$UProjectPath" `
+        -nop4 `
+        -platform=Win64 `
+        -serverconfig=$BuildConfig `
+        -server `
+        -noclient `
+        -cook `
+        -allmaps `
+        -build `
+        -stage `
+        -pak `
+        -archive `
+        -archivedirectory="$ProjectDir\Saved\Packages\$BuildConfig\Server"
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Server package failed (project may not have server target)"
+    }
+
+    return @{
+        Configuration = $BuildConfig
+        Client = "$ProjectDir\Saved\Packages\$BuildConfig\Client"
+        Server = "$ProjectDir\Saved\Packages\$BuildConfig\Server"
+    }
+}
+
+function Open-UnrealProject {
+    Write-Host "`nOpening Unreal Engine project..." -ForegroundColor Cyan
+
+    # Find .uproject file
+    $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
+    if (-not $UProjectPath) {
+        Write-Error "No .uproject file found. Please create your Unreal project first."
+        return
+    }
+
+    # Generate project files
+    Write-Host "Generating project files..."
+    try {
+        Invoke-UnrealGenerate -UProjectPath $UProjectPath
+    } catch {
+        Write-Error "Project file generation failed: $($_.Exception.Message)"
+        return
+    }
+
+    # Build editor
+    Write-Host "Building editor..."
+    try {
+        $BuildSuccess = Invoke-UnrealBuild -UProjectPath $UProjectPath
+        if (-not $BuildSuccess) {
+            Write-Error "Build failed. Check output above for errors."
+            return
+        }
+    } catch {
+        Write-Error "Build failed: $($_.Exception.Message)"
+        return
+    }
+
+    # Launch editor
+    Write-Host "Launching Unreal Editor..."
+    try {
+        Invoke-UnrealEditor -UProjectPath $UProjectPath
+        Write-Host "Editor launched successfully!" -ForegroundColor Green
+    } catch {
+        Write-Error "Failed to launch editor: $($_.Exception.Message)"
+    }
+}
+
+function Build-UnrealProject {
+    Write-Host "`nBuilding Unreal Engine project..." -ForegroundColor Cyan
+
+    $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
+    if (-not $UProjectPath) {
+        Write-Error "No .uproject file found."
+        return
+    }
+
+    # Generate project files
+    Write-Host "Generating project files..."
+    try {
+        Invoke-UnrealGenerate -UProjectPath $UProjectPath
+    } catch {
+        Write-Error "Project file generation failed: $($_.Exception.Message)"
+        return
+    }
+
+    # Build editor
+    Write-Host "Building editor..."
+    try {
+        $BuildSuccess = Invoke-UnrealBuild -UProjectPath $UProjectPath
+        if ($BuildSuccess) {
+            Write-Host "Build completed successfully!" -ForegroundColor Green
+        } else {
+            Write-Error "Build failed."
+        }
+    } catch {
+        Write-Error "Build failed: $($_.Exception.Message)"
+    }
+}
+
+function Clean-UnrealProject {
+    Write-Host "`nCleaning Unreal Engine project..." -ForegroundColor Cyan
+
+    $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
+    if (-not $UProjectPath) {
+        Write-Error "No .uproject file found."
+        return
+    }
+
+    try {
+        Invoke-UnrealClean -UProjectPath $UProjectPath
+    } catch {
+        Write-Error "Clean failed: $($_.Exception.Message)"
+    }
+}
+
+function Pull-FromGitHub {
+    Write-Host "`nPulling from GitHub..." -ForegroundColor Cyan
+
+    Push-Location $CloneRoot
+
+    # Check current branch
+    $CurrentBranch = git rev-parse --abbrev-ref HEAD
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "Failed to get current branch"
+        return
+    }
+
+    if ($CurrentBranch -ne "main") {
+        Write-Error "Not on main branch (currently on $CurrentBranch). Switch to main first."
+        Pop-Location
+        return
+    }
+
+    # Stash changes
+    Write-Host "Stashing local changes..."
+    git stash push -m "QUE auto-stash $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+
+    # Pull from remote
+    Write-Host "Pulling from origin/main..."
+    git pull origin main
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "git pull failed with exit code $LASTEXITCODE"
+        Write-Host "Your stashed changes are safe. Run 'git stash list' to see them." -ForegroundColor Yellow
+        return
+    }
+
+    # Restore stashed changes
+    Write-Host "Restoring stashed changes..."
+    $StashList = git stash list
+    if ($StashList) {
+        git stash pop
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Stash pop had conflicts or failed."
+            Write-Host "`nTo resolve conflicts:" -ForegroundColor Yellow
+            Write-Host "  1. Fix conflicts in affected files" -ForegroundColor Yellow
+            Write-Host "  2. Run: git add <resolved-files>" -ForegroundColor Yellow
+            Write-Host "  3. Run: git stash drop" -ForegroundColor Yellow
+            Write-Host "`nYour stashed changes are safe and can be recovered with: git stash apply" -ForegroundColor Yellow
+            Pop-Location
+            return
+        }
+        Write-Host "Note: Changes remain in stash for manual recovery if needed. Use 'git stash drop' to remove." -ForegroundColor Yellow
+    }
+
+    Pop-Location
+    Write-Host "Pull completed!" -ForegroundColor Green
+}
+
+function Push-ToGitHub {
+    Write-Host "`nPushing to GitHub..." -ForegroundColor Cyan
+
+    Push-Location $CloneRoot
+
+    # Check current branch
+    $CurrentBranch = git rev-parse --abbrev-ref HEAD
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "Failed to get current branch"
+        return
+    }
+
+    if ($CurrentBranch -ne "main") {
+        Write-Error "Not on main branch (currently on $CurrentBranch). Switch to main first."
+        Pop-Location
+        return
+    }
+
+    # Create temporary branch
+    $TempBranch = "que-push-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    Write-Host "Creating branch: $TempBranch"
+    git checkout -b $TempBranch
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "Failed to create temporary branch"
+        return
+    }
+
+    # Commit all changes
+    Write-Host "Committing all changes..."
+    git add -A
+    if ($LASTEXITCODE -ne 0) {
+        git checkout main
+        git branch -D $TempBranch
+        Pop-Location
+        Write-Error "git add failed"
+        return
+    }
+
+    $CommitMessage = Read-Host "Enter commit message"
+    if ([string]::IsNullOrWhiteSpace($CommitMessage)) {
+        $CommitMessage = "QUE auto-commit $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    }
+    git commit -m $CommitMessage
+    if ($LASTEXITCODE -ne 0) {
+        git checkout main
+        git branch -D $TempBranch
+        Pop-Location
+        Write-Error "git commit failed (nothing to commit?)"
+        return
+    }
+
+    # Fetch and rebase on main
+    Write-Host "Fetching latest from origin..."
+    git fetch origin
+    if ($LASTEXITCODE -ne 0) {
+        git checkout main
+        git branch -D $TempBranch
+        Pop-Location
+        Write-Error "git fetch failed"
+        return
+    }
+
+    Write-Host "Rebasing on origin/main..."
+    git rebase origin/main
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Rebase failed. Aborting push. Resolve conflicts manually."
+        git rebase --abort
+        git checkout main
+        git branch -D $TempBranch
+        Pop-Location
+        return
+    }
+
+    # Push branch
+    Write-Host "Pushing branch to origin..."
+    git push -u origin $TempBranch
+    if ($LASTEXITCODE -ne 0) {
+        git checkout main
+        git branch -D $TempBranch
+        Pop-Location
+        Write-Error "git push failed"
+        return
+    }
+
+    # Switch to main
+    Write-Host "Switching to main..."
+    git checkout main
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "Failed to switch to main"
+        return
+    }
+
+    # Pull latest main
+    git pull origin main
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "Failed to pull latest main"
+        return
+    }
+
+    # Merge temp branch
+    Write-Host "Merging $TempBranch into main..."
+    git merge $TempBranch --no-ff -m "Merge $TempBranch"
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "Merge failed"
+        return
+    }
+
+    # Push main
+    Write-Host "Pushing main to origin..."
+    git push origin main
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "Failed to push main"
+        return
+    }
+
+    # Delete temp branch (locally and remotely)
+    Write-Host "Cleaning up temporary branch..."
+    git branch -d $TempBranch
+    git push origin --delete $TempBranch 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to delete remote branch (may have been deleted already)"
+    }
+
+    Pop-Location
+    Write-Host "Push completed!" -ForegroundColor Green
+}
+
+function Package-UnrealProject {
+    Write-Host "`nPackaging Unreal Engine project..." -ForegroundColor Cyan
+
+    $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
+    if (-not $UProjectPath) {
+        Write-Error "No .uproject file found."
+        return
+    }
+
+    try {
+        $PackageResult = Invoke-UnrealPackage -UProjectPath $UProjectPath
+
+        if ($PackageResult) {
+            Write-Host "`nPackaging complete ($($PackageResult.Configuration))!" -ForegroundColor Green
+            if ($PackageResult.Client) {
+                Write-Host "Client package: $($PackageResult.Client)"
+            }
+            if ($PackageResult.Server) {
+                Write-Host "Server package: $($PackageResult.Server)"
+            }
+        }
+    } catch {
+        Write-Error "Packaging failed: $($_.Exception.Message)"
+    }
+}
+
+function Show-WorkspaceInfo {
+    Write-Host "`n===============================================================" -ForegroundColor Cyan
+    Write-Host "  QUE Workspace Information" -ForegroundColor Green
+    Write-Host "===============================================================" -ForegroundColor Cyan
+
+    # Workspace info
+    Write-Host "`nWorkspace:" -ForegroundColor Yellow
+    Write-Host "  Root: $WorkspaceRoot"
+    Write-Host "  Version: $(Get-Content "$WorkspaceRoot\.que\workspace-version" -ErrorAction SilentlyContinue)"
+
+    # Clone info
+    Write-Host "`nClone:" -ForegroundColor Yellow
+    Write-Host "  Name: $CloneName"
+    Write-Host "  Root: $CloneRoot"
+    $RepoVersion = Get-Content "$WorkspaceRoot\.que\repo\$CloneName\repo-version" -ErrorAction SilentlyContinue
+    Write-Host "  Version: $(if ($RepoVersion) { $RepoVersion } else { 'Not set' })"
+
+    # GitHub info
+    Write-Host "`nGitHub:" -ForegroundColor Yellow
+    Write-Host "  Repository: $GitHubOwner/$GitHubRepo"
+
+    Push-Location $CloneRoot
+    $GitUser = git config user.name
+    if ($LASTEXITCODE -eq 0) {
+        $GitEmail = git config user.email
+        $GitBranch = git rev-parse --abbrev-ref HEAD 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  User: $GitUser <$GitEmail>"
+            Write-Host "  Branch: $GitBranch"
+        } else {
+            Write-Host "  User: $GitUser <$GitEmail>"
+            Write-Host "  Branch: (unable to determine)"
+        }
+    }
+    Pop-Location
+
+    # Unreal project info
+    $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
+    if ($UProjectPath) {
+        Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
+        Write-Host "  Project: $UProjectPath"
+        Write-Host "  Version: $UnrealEngineVersion"
+    } else {
+        Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
+        Write-Host "  No .uproject file found"
+    }
+
+    # SyncThing info
+    Write-Host "`nSyncThing:" -ForegroundColor Yellow
+    $SyncThingRunning = Get-Process syncthing -ErrorAction SilentlyContinue
+    if ($SyncThingRunning) {
+        Write-Host "  Status: Running"
+        Write-Host "  Devices: $($SyncThingDevices.Count)"
+        foreach ($Device in $SyncThingDevices.GetEnumerator()) {
+            Write-Host "    - $($Device.Key): $($Device.Value)"
+        }
+    } else {
+        Write-Host "  Status: Not running"
+    }
+
+    Write-Host "`n===============================================================`n" -ForegroundColor Cyan
+}
+#>###QUE_MANAGEMENT_MODE_END###
 
 # ----------------------------------------------------------------------------
 # MAIN EXECUTION FUNCTION
