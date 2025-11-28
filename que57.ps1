@@ -925,7 +925,7 @@ function Ensure-SyncThingRunning {
             ArgumentList = $StartArgs
             WindowStyle = 'Hidden'
         }
-        StartProcess @StartProcessArgs
+        Start-Process @StartProcessArgs
         Start-Sleep -Seconds 5
 
     } else {
@@ -1296,8 +1296,8 @@ $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
     $ScriptContent = $ScriptContent -replace ('{0}QUE_EMBEDDED_FILES_BEGIN{0}[\s\S]*?{0}QUE_EMBEDDED_FILES_END{0}' -f @($ThreeHashes)), ''
 
     # 4. Uncomment management mode code
-    $ScriptContent = ScriptContent -replace ('<#{0}QUE_MANAGEMENT_MODE_BEGIN{0}' -f @($ThreeHashes))
-    $ScriptContent = ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes))
+    $ScriptContent = $ScriptContent -replace ('<#{0}QUE_MANAGEMENT_MODE_BEGIN{0}' -f @($ThreeHashes))
+    $ScriptContent = $ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes))
 
     # Write the generated script
     Set-Content -Path $OutputPath -Value $ScriptContent -Encoding UTF8
