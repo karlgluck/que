@@ -553,8 +553,9 @@ function Install-NetFx3WithElevation {
 
     # Check if already enabled (this doesn't require elevation)
     try {
-        $NetFx3Feature = Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop
-        if ($NetFx3Feature.State -eq 'Enabled') {
+        $netfx3 = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5" -ErrorAction SilentlyContinue
+
+        if ($netfx3.Version) {
             Write-Host ".NET Framework 3.5 (NetFx3) is already enabled." -ForegroundColor Green
             return $true
         }
