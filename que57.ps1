@@ -917,7 +917,9 @@ function Ensure-SyncThingRunning {
             "--no-upgrade"
         )
 
-        Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs # -WindowStyle Hidden
+        Write-Host "$StartArgs"
+        #Start-Process -FilePath $SyncThingExe -ArgumentList $StartArgs # -WindowStyle Hidden
+        & $SyncThingExe @StartArgs
         Start-Sleep -Seconds 5
 
         # Browser will be opened automatically
