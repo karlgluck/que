@@ -161,10 +161,11 @@ This project is managed using QUE (Quick Unreal Engine).
 To set up your development environment and join this project:
 
 1. Create an empty directory for your workspace
-2. Run this command in PowerShell:
+2. Get your GitHub Personal Access Token (see below)
+3. Run this command in PowerShell:
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr $AuthHeaders = @{Authorization = @("token", $quePlainPAT = Read-Host 'Enter Personal Access Token') -join ' '"} ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
 ```
 
 3. Follow the prompts to:
@@ -179,13 +180,13 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 
 - Windows 10/11
 - PowerShell 5.1 or later
-- GitHub Personal Access Token with `repo` and `workflow` permissions
+- GitHub Personal Access Token with `repo` and `read:org` permissions
 
 ## Getting a GitHub PAT
 
 1. Go to https://github.com/settings/tokens
 2. Click "Generate new token (classic)"
-3. Select scopes: `repo` (all), `workflow`
+3. Select scopes: `repo` (all), `read:org`
 4. Generate and copy the token
 
 ## Management Commands
@@ -940,7 +941,7 @@ function Configure-SyncThingFolders {
         $LfsPath
         "--ignore-delete"
     )
-    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, ($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" } | Join-String ' '))
+    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, (($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" }) -join ' '))
     & $SyncThingExe @CliArgs
 
     # Add depot folder (bidirectional)
@@ -964,7 +965,7 @@ function Configure-SyncThingFolders {
         "--path"
         $DepotPath
     )
-    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, ($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" } | Join-String ' '))
+    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, (($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" }) -join ' '))
     & $SyncThingExe @CliArgs
 
     Write-Host "SyncThing folders configured successfully" -ForegroundColor Green
@@ -1025,7 +1026,7 @@ function Update-SyncThingDevices {
                 $DeviceName
                 "--auto-accept-folders"
             )
-            Write-Host ("Executing: {0} {1}" -f $SyncThingExe, ($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" } | Join-String ' '))
+            Write-Host ("Executing: {0} {1}" -f $SyncThingExe, (($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" }) -join ' '))
             & $SyncThingExe @CliArgs
         } else {
             Write-Host "Device $DeviceName ($DeviceId) already configured, skipping" -ForegroundColor Gray
@@ -2306,7 +2307,7 @@ function Invoke-QueMain {
             if ($IsBootstrapScript) {
                 ###QUE_CREATION_MODE_BEGIN###
                 # Bootstrap mode - prompt for new repo name with default
-                Write-Host "Setting up a new workspace...`n" -ForegroundColor Green
+                Write-Host "Setting up a new project workspace...`n" -ForegroundColor Green
 
                 # Generate default repo name from current folder
                 $CurrentFolderName = Split-Path $WorkspaceRoot -Leaf
@@ -2346,9 +2347,13 @@ function Invoke-QueMain {
                 # Joining existing project - use URL owner/repo
                 Write-Host "Joining project: $UrlOwner/$UrlRepo`n" -ForegroundColor Green
 
-                # Prompt for PAT
-                $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
-                $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
+                # Prompt for PAT unless it was provided in the initial command
+                if ($quePlainPAT) {
+                    $PlainPAT = $quePlainPAT
+                } else {
+                    $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
+                    $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
+                }
 
                 # Get user info from PAT
                 $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
@@ -2385,7 +2390,7 @@ function Invoke-QueMain {
             $CurrentDeviceId = $SyncThingInfo.DeviceId
             if ($SyncThingDevices -and -not $SyncThingDevices.ContainsValue($CurrentDeviceId)) {
                 Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
-        
+
                 # Add to dictionary
                 $SyncThingDevices[$env:COMPUTERNAME] = $CurrentDeviceId
         
