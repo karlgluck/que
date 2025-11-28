@@ -312,6 +312,9 @@ function Get-SecureGitHubPAT {
 
     try {
         $SecureString = Get-Content $PatFile | ConvertTo-SecureString
+        # Because we are targeting the version that comes pre-installed on Windows 10/11,
+        # this verbose approach is preferred to the feature that
+        # requires PowerShell 7: "ConvertFrom-SecureString $SecureString -AsPlainText"
         $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
         $PlainPAT = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
@@ -796,35 +799,66 @@ function Ensure-SyncThingRunning {
         New-Item -ItemType Directory -Force -Path $SyncThingHome | Out-Null
     }
 
-    # Get or generate API key and GUI address from config
+    # Get or generate API key and GUI address
     $ConfigPath = Join-Path $SyncThingHome "config.xml"
+    $ApiKeyFile = Join-Path $WorkspaceRoot "env\syncthing\api.key"
     $ApiKey = $null
     $GuiAddress = $null
     $IsFirstTime = $false
 
-    # TODO: rewrite code around this point to store the API key as described
+    # Check if we have a stored API key
+    if (Test-Path $ApiKeyFile) {
+        # Read existing API key from secure storage
+        try {
+            $SecureString = Get-Content $ApiKeyFile | ConvertTo-SecureString
+            $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+            $ApiKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+            Write-Host "Using existing SyncThing API key" -ForegroundColor Gray
+        } catch {
+            Write-Warning "Failed to decrypt API key: $($_.Exception.Message)"
+            $ApiKey = $null
+        }
+    }
 
-    if (Test-Path $ConfigPath) {
-        # Read existing config
+    # If no valid API key, this is first-time initialization
+    if (-not $ApiKey) {
+        $IsFirstTime = $true
+
+        # Delete existing config.xml to force clean initialization
+        if (Test-Path $ConfigPath) {
+            Write-Host "Removing existing SyncThing config for fresh initialization..." -ForegroundColor Yellow
+            Remove-Item $ConfigPath -Force
+        }
+
+        # Generate new API key
+        $ApiKey = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | ForEach-Object {[char]$_})
+
+        # Store API key securely
+        $SyncThingEnvDir = Join-Path $WorkspaceRoot "env\syncthing"
+        if (-not (Test-Path $SyncThingEnvDir)) {
+            New-Item -ItemType Directory -Force -Path $SyncThingEnvDir | Out-Null
+        }
+        $SecureString = ConvertTo-SecureString $ApiKey -AsPlainText -Force
+        $SecureString | ConvertFrom-SecureString | Set-Content $ApiKeyFile
+        Write-Host "Generated and stored new SyncThing API key" -ForegroundColor Green
+    }
+
+    # Try to read GUI address from existing config, or generate new one
+    if ((Test-Path $ConfigPath) -and -not $IsFirstTime) {
         try {
             [xml]$Config = Get-Content $ConfigPath
-            $ApiKey = $Config.configuration.gui.apikey
             $GuiAddress = $Config.configuration.gui.address
-            Write-Host "Using existing SyncThing config" -ForegroundColor Gray
+            Write-Host "Using existing SyncThing GUI address: $GuiAddress" -ForegroundColor Gray
         } catch {
-            Write-Warning "Failed to parse config.xml, generating new config"
+            Write-Warning "Failed to parse config.xml for GUI address"
         }
-    } else {
-        $IsFirstTime = $true
     }
 
-    # Generate new config if needed
-    if (-not $ApiKey) {
-        $ApiKey = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | ForEach-Object {[char]$_})
-    }
     if (-not $GuiAddress) {
         $Port = Get-AvailableSyncThingPort
         $GuiAddress = "127.0.0.1:$Port"
+        Write-Host "Generated new SyncThing GUI address: $GuiAddress" -ForegroundColor Gray
     }
 
     # Check if SyncThing is running using CLI
