@@ -782,8 +782,6 @@ function Ensure-SyncThingRunning {
     #>
     param([string]$WorkspaceRoot)
 
-    $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
-
     # Locate syncthing executable
     $SyncThingExe = Get-SyncThingExecutable
     if (-not $SyncThingExe) {
@@ -792,7 +790,8 @@ function Ensure-SyncThingRunning {
     }
     Write-Host "Found Syncthing at: $SyncThingExe" -ForegroundColor Gray
 
-    # Create home directory if needed
+    # Get SyncThing home and ensure it exists
+    $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     if (-not (Test-Path $SyncThingHome)) {
         New-Item -ItemType Directory -Force -Path $SyncThingHome | Out-Null
     }
@@ -801,6 +800,9 @@ function Ensure-SyncThingRunning {
     $ConfigPath = Join-Path $SyncThingHome "config.xml"
     $ApiKey = $null
     $GuiAddress = $null
+    $IsFirstTime = $false
+
+    # TODO: rewrite code around this point to store the API key as described
 
     if (Test-Path $ConfigPath) {
         # Read existing config
@@ -812,6 +814,8 @@ function Ensure-SyncThingRunning {
         } catch {
             Write-Warning "Failed to parse config.xml, generating new config"
         }
+    } else {
+        $IsFirstTime = $true
     }
 
     # Generate new config if needed
@@ -835,7 +839,7 @@ function Ensure-SyncThingRunning {
             "--home=$SyncThingHome"
             "--gui-address=$GuiAddress"
             "--gui-apikey=$ApiKey"
-            "--no-default-folder"
+            #"--no-default-folder" # this parameter appears to have been removed in recent versions; unfortunately, it now causes an error rather than being ignored
             "--unpaused"
             "--no-upgrade"
         )
@@ -860,11 +864,17 @@ function Ensure-SyncThingRunning {
         Write-Warning "Could not retrieve device ID"
     }
 
-    return @{
+    $SyncThingInfo = @{
         DeviceId = $DeviceId
         GuiAddress = $GuiAddress
         ApiKey = $ApiKey
     }
+
+    if ($IsFirstTime) {
+        Configure-SyncThingFolders -WorkspaceRoot $WorkspaceRoot -SyncThingInfo $SyncThingInfo
+    }
+
+    return $SyncThingInfo
 }
 
 function Initialize-SyncThing {
@@ -876,20 +886,11 @@ function Initialize-SyncThing {
     #>
     param([string]$WorkspaceRoot)
 
-    # Create SyncThing home if it doesn't exist
-    $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
-    if (-not (Test-Path $SyncThingHome)) {
-        New-Item -ItemType Directory -Force -Path $SyncThingHome | Out-Null
-    }
-
     # Start SyncThing
     $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
     if (-not $SyncThingInfo) {
         throw "Failed to start SyncThing"
     }
-
-    # Configure folders
-    Configure-SyncThingFolders -WorkspaceRoot $WorkspaceRoot -SyncThingInfo $SyncThingInfo
 
     return $SyncThingInfo
 }
@@ -933,15 +934,11 @@ function Configure-SyncThingFolders {
         "config"
         "folders"
         "add"
-        "--id"
-        $LfsFolderId
-        "--label"
-        $LfsLabel
-        "--path"
-        $LfsPath
+        "--id=$LfsFolderId"
+        "--label=$LfsLabel"
+        "--path=$LfsPath"
         "--ignore-delete"
     )
-    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, (($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" }) -join ' '))
     & $SyncThingExe @CliArgs
 
     # Add depot folder (bidirectional)
@@ -958,14 +955,10 @@ function Configure-SyncThingFolders {
         "config"
         "folders"
         "add"
-        "--id"
-        $DepotFolderId
-        "--label"
-        $DepotLabel
-        "--path"
-        $DepotPath
+        "--id=$DepotFolderId"
+        "--label=$DepotLabel"
+        "--path=$DepotPath"
     )
-    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, (($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" }) -join ' '))
     & $SyncThingExe @CliArgs
 
     Write-Host "SyncThing folders configured successfully" -ForegroundColor Green
@@ -1020,13 +1013,10 @@ function Update-SyncThingDevices {
                 "config"
                 "devices"
                 "add"
-                "--device-id"
-                $DeviceId
-                "--name"
-                $DeviceName
+                "--device-id=$DeviceId"
+                "--name=$DeviceName"
                 "--auto-accept-folders"
             )
-            Write-Host ("Executing: {0} {1}" -f $SyncThingExe, (($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" }) -join ' '))
             & $SyncThingExe @CliArgs
         } else {
             Write-Host "Device $DeviceName ($DeviceId) already configured, skipping" -ForegroundColor Gray
@@ -1460,7 +1450,7 @@ function New-QueClone {
     }
 
     # Ensure SyncThing is running (important for subsequent clones)
-    if (-not $IsFirstClone) {
+    if (-not $SyncThingInfo) {
         Write-Host "Ensuring SyncThing is running..." -ForegroundColor Cyan
         $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
     }
