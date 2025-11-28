@@ -940,6 +940,7 @@ function Configure-SyncThingFolders {
         $LfsPath
         "--ignore-delete"
     )
+    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, ($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" } | Join-String ' '))
     & $SyncThingExe @CliArgs
 
     # Add depot folder (bidirectional)
@@ -963,6 +964,7 @@ function Configure-SyncThingFolders {
         "--path"
         $DepotPath
     )
+    Write-Host ("Executing: {0} {1}" -f $SyncThingExe, ($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" } | Join-String ' '))
     & $SyncThingExe @CliArgs
 
     Write-Host "SyncThing folders configured successfully" -ForegroundColor Green
@@ -1023,6 +1025,7 @@ function Update-SyncThingDevices {
                 $DeviceName
                 "--auto-accept-folders"
             )
+            Write-Host ("Executing: {0} {1}" -f $SyncThingExe, ($CliArgs.Keys | ForEach-Object { "-$_ `"$($CliArgs[$_])`"" } | Join-String ' '))
             & $SyncThingExe @CliArgs
         } else {
             Write-Host "Device $DeviceName ($DeviceId) already configured, skipping" -ForegroundColor Gray
@@ -1515,50 +1518,54 @@ function New-QueRepoScript {
 
     # 1. Update constants section
     $ConstantsBlock = @"
-###QUE_CONSTANTS_BEGIN###
+{0}QUE_CONSTANTS_BEGIN{0}
 `$UnrealEngineVersion = "5.7"
 `$GitHubOwner = "$Owner"
 `$GitHubRepo = "$Repo"
-###QUE_CONSTANTS_END###
-"@
+{0}QUE_CONSTANTS_END{0}
+"@ -f @('###')
 
-    $ScriptContent = $ScriptContent -replace '###QUE_CONSTANTS_BEGIN###[\s\S]*?###QUE_CONSTANTS_END###', $ConstantsBlock
+    $ScriptContent = $ScriptContent -replace ('{0}QUE_CONSTANTS_BEGIN{0}[\s\S]*?{0}QUE_CONSTANTS_END{0}' -f @('###')), $ConstantsBlock
 
     # 2. Add SyncThing devices section (initially just this device if provided)
+    $ThreeHashes = '###'
     if ($SyncThingDeviceId) {
         $SyncThingBlock = @"
-###QUE_SYNCTHING_BEGIN###
+$($ThreeHashes)QUE_SYNCTHING_BEGIN$($ThreeHashes)
 `$SyncThingDevices = @{
     "$env:COMPUTERNAME" = "$SyncThingDeviceId"
 }
-###QUE_SYNCTHING_END###
+$($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
 "@
     } else {
         $SyncThingBlock = @"
-###QUE_SYNCTHING_BEGIN###
+$($ThreeHashes)QUE_SYNCTHING_BEGIN$($ThreeHashes)
 `$SyncThingDevices = @{}
-###QUE_SYNCTHING_END###
+$($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
 "@
     }
 
-    $ScriptContent = $ScriptContent -replace '###QUE_SYNCTHING_BEGIN###[\s\S]*?###QUE_SYNCTHING_END###', $SyncThingBlock
+    $ScriptContent = $ScriptContent -replace ('{0}QUE_SYNCTHING_BEGIN{0}[\s\S]*?{0}QUE_SYNCTHING_END{0}' -f @($ThreeHashes)), $SyncThingBlock
 
-    # 3. Remove workspace creation code
-    $ScriptContent = $ScriptContent -replace '###QUE_CREATION_MODE_BEGIN###[\s\S]*?###QUE_CREATION_MODE_END###', ''
+    # 3. Remove workspace creation code and embedded files
+    $ScriptContent = $ScriptContent -replace ('{0}QUE_CREATION_MODE_BEGIN{0}[\s\S]*?{0}QUE_CREATION_MODE_END{0}' -f @($ThreeHashes)), ''
+    $ScriptContent = $ScriptContent -replace ('{0}QUE_EMBEDDED_FILES_BEGIN{0}[\s\S]*?{0}QUE_EMBEDDED_FILES_END{0}' -f @($ThreeHashes)), ''
 
     # 4. Uncomment management mode code
-    if ($ScriptContent -match '###QUE_MANAGEMENT_MODE_BEGIN###([\s\S]*?)###QUE_MANAGEMENT_MODE_END###') {
+    $MatchExpression = '{0}QUE_MANAGEMENT_MODE_BEGIN{0}([\s\S]*?){0}QUE_MANAGEMENT_MODE_END{0}' -f @('###')
+    if ($ScriptContent -match $MatchExpression) {
         $ManagementCode = $Matches[1]
         # Remove comment markers (lines starting with # followed by space)
         $UncommentedCode = $ManagementCode -replace '(?m)^# ', ''
-        $ScriptContent = $ScriptContent -replace '###QUE_MANAGEMENT_MODE_BEGIN###[\s\S]*?###QUE_MANAGEMENT_MODE_END###', "###QUE_MANAGEMENT_MODE_BEGIN###`n$UncommentedCode`n###QUE_MANAGEMENT_MODE_END###"
+        $ScriptContent = $ScriptContent -replace $MatchExpression, "$($ThreeHashes)QUE_MANAGEMENT_MODE_BEGIN$($ThreeHashes)`n$UncommentedCode`n$($ThreeHashes)QUE_MANAGEMENT_MODE_END$($ThreeHashes)"
     }
 
     # 5. Uncomment direct execution mode code
-    if ($ScriptContent -match '###QUE_DIRECT_EXEC_BEGIN###([\s\S]*?)###QUE_DIRECT_EXEC_END###') {
+    $MatchExpression = '{0}QUE_DIRECT_EXEC_BEGIN{0}([\s\S]*?){0}QUE_DIRECT_EXEC_END{0}' -f @('###')
+    if ($ScriptContent -match $MatchExpression) {
         $DirectExecCode = $Matches[1]
         $UncommentedCode = $DirectExecCode -replace '(?m)^# ', ''
-        $ScriptContent = $ScriptContent -replace '###QUE_DIRECT_EXEC_BEGIN###[\s\S]*?###QUE_DIRECT_EXEC_END###', "###QUE_DIRECT_EXEC_BEGIN###`n$UncommentedCode`n###QUE_DIRECT_EXEC_END###"
+        $ScriptContent = $ScriptContent -replace $MatchExpression, "$($ThreeHashes)QUE_DIRECT_EXEC_BEGIN$($ThreeHashes)`n$UncommentedCode`n$($ThreeHashes)QUE_DIRECT_EXEC_END$($ThreeHashes)"
     }
 
     # Write the generated script
@@ -1625,7 +1632,7 @@ function New-QueWorkspace {
 
     # Step 5: Determine initialization mode
     $ShouldClone = $false
-    $InitMode = 0  # 0 = blank, 1 = from GitHub, 2 = from local
+    $InitMode = 0  # 0 = blank, 1 = from other GitHub repo, 2 = from local, 3 = as part of existing GitHub repo
 
     if ($RepoExists) {
         Write-Host "`nRepository exists on GitHub. Initialize workspace for use with Que?" -ForegroundColor Yellow
@@ -1635,7 +1642,7 @@ function New-QueWorkspace {
             return
         }
         $ShouldClone = $true
-        $InitMode = 1  # From GitHub
+        $InitMode = 3  # From GitHub repo that already exists
     } else {
         Write-Host "`nSelect initialization method:" -ForegroundColor Yellow
         $Options = @(
@@ -1652,29 +1659,7 @@ function New-QueWorkspace {
 
         switch ($InitMode) {
             0 {
-                # Blank project - create new repo on GitHub
-                Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
-                try {
-                    $CreateRepoBody = @{
-                        name = $GitHubRepo
-                        private = $true
-                        auto_init = $false
-                    } | ConvertTo-Json
-
-                    $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
-                        "https://api.github.com/user/repos"
-                    } else {
-                        "https://api.github.com/orgs/$GitHubOwner/repos"
-                    }
-
-                    Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
-                    Write-Host "Repository created successfully" -ForegroundColor Green
-                } catch {
-                    Write-Error "Failed to create repository: $($_.Exception.Message)"
-                    Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $GitHubOwner"
-                    return
-                }
-                $ShouldClone = $false
+                # Blank project
             }
             1 {
                 # From existing GitHub project
@@ -1684,65 +1669,41 @@ function New-QueWorkspace {
                     return
                 }
 
-                # Create repo on GitHub first
-                Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
-                try {
-                    $CreateRepoBody = @{
-                        name = $GitHubRepo
-                        private = $true
-                        auto_init = $false
-                    } | ConvertTo-Json
-
-                    $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
-                        "https://api.github.com/user/repos"
-                    } else {
-                        "https://api.github.com/orgs/$GitHubOwner/repos"
-                    }
-
-                    Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
-                    Write-Host "Repository created successfully" -ForegroundColor Green
-                } catch {
-                    Write-Error "Failed to create repository: $($_.Exception.Message)"
-                    return
-                }
-
                 # Clone from source URL, then push to new repo
-                $ShouldClone = $false
                 $CloneFromSource = $SourceUrl
             }
             2 {
-                # From local repository
-                $LocalRepoPath = Read-Host "`nEnter path to local repository"
+                # From local directory
+                $LocalRepoPath = Read-Host "`nEnter path to local directory"
                 if ([string]::IsNullOrWhiteSpace($LocalRepoPath) -or -not (Test-Path $LocalRepoPath)) {
-                    Write-Error "Invalid repository path"
+                    Write-Error "Invalid path"
                     return
                 }
-
-                # Create repo on GitHub first
-                Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
-                try {
-                    $CreateRepoBody = @{
-                        name = $GitHubRepo
-                        private = $true
-                        auto_init = $false
-                    } | ConvertTo-Json
-
-                    $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
-                        "https://api.github.com/user/repos"
-                    } else {
-                        "https://api.github.com/orgs/$GitHubOwner/repos"
-                    }
-
-                    Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
-                    Write-Host "Repository created successfully" -ForegroundColor Green
-                } catch {
-                    Write-Error "Failed to create repository: $($_.Exception.Message)"
-                    return
-                }
-
-                $ShouldClone = $false
                 $CopyFromLocal = $LocalRepoPath
             }
+        }
+    
+        # Create new repo on GitHub first
+        Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
+        try {
+            $CreateRepoBody = @{
+                name = $GitHubRepo
+                private = $true
+                auto_init = $false
+            } | ConvertTo-Json
+
+            $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
+                "https://api.github.com/user/repos"
+            } else {
+                "https://api.github.com/orgs/$GitHubOwner/repos"
+            }
+
+            Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
+            Write-Host "Repository created successfully" -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to create repository: $($_.Exception.Message)"
+            Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $GitHubOwner"
+            return
         }
     }
 
@@ -1755,19 +1716,18 @@ function New-QueWorkspace {
 
     # Step 8: Create first clone
     Write-Host "`nCreating first clone..." -ForegroundColor Cyan
-    New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone $true -ShouldClone $ShouldClone -UserInfo $UserInfo -PlainPAT $PlainPAT -SyncThingInfo $SyncThingInfo
+    $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone $true -ShouldClone $ShouldClone -UserInfo $UserInfo -PlainPAT $PlainPAT -SyncThingInfo $SyncThingInfo
 
     # Step 9: Handle special initialization modes
-    if ($InitMode -eq 1 -and $CloneFromSource) {
-        # Clone from source GitHub URL and push to new repo
-        Write-Host "`nCloning from source repository..." -ForegroundColor Cyan
-        $CloneName = Get-Content "$WorkspaceRoot\.que\repo" -ErrorAction SilentlyContinue | Select-Object -Last 1
-        if (-not $CloneName) {
-            # Find the most recent clone
-            $CloneName = (Get-ChildItem "$WorkspaceRoot\repo" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
-        }
-        $CloneRoot = Join-Path $WorkspaceRoot "repo\$CloneName"
+    if ($InitMode -eq 0) {
+        Write-Host "`nBlank project workspace created" -ForegroundColor Green
+        Write-Host "Next steps:" -ForegroundColor Cyan
+        Write-Host "  1. Create your Unreal Engine project in: $CloneRoot" -ForegroundColor White
+        Write-Host "  2. Add and commit your files with git" -ForegroundColor White
+        Write-Host "  3. Push to GitHub when ready" -ForegroundColor White
+    } elseif ($InitMode -eq 1 -and $CloneFromSource) {
 
+        # Get content from another repo
         Push-Location $CloneRoot
         git remote add source $CloneFromSource
         git fetch source
@@ -1776,17 +1736,10 @@ function New-QueWorkspace {
         git remote remove source
         Pop-Location
 
-        Write-Host "Imported from source repository" -ForegroundColor Green
+        Write-Host "Imported from source repository into $CloneRoot" -ForegroundColor Green
     } elseif ($InitMode -eq 2 -and $CopyFromLocal) {
-        # Copy from local repository
-        Write-Host "`nCopying from local repository..." -ForegroundColor Cyan
-        $CloneName = Get-Content "$WorkspaceRoot\.que\repo" -ErrorAction SilentlyContinue | Select-Object -Last 1
-        if (-not $CloneName) {
-            $CloneName = (Get-ChildItem "$WorkspaceRoot\repo" -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
-        }
-        $CloneRoot = Join-Path $WorkspaceRoot "repo\$CloneName"
 
-        # Copy files from local repo (excluding .git)
+        # Copy files from a directory (excluding .git)
         $SourceFiles = Get-ChildItem $CopyFromLocal -Exclude ".git" -Force
         foreach ($File in $SourceFiles) {
             Copy-Item $File.FullName -Destination $CloneRoot -Recurse -Force
@@ -1799,7 +1752,13 @@ function New-QueWorkspace {
         git push origin main
         Pop-Location
 
-        Write-Host "Imported from local repository" -ForegroundColor Green
+        Write-Host "Imported from local repository into $CloneRoot" -ForegroundColor Green
+    } elseif ($InitMode -eq 3) {
+        Push-Location $CloneRoot
+        git pull
+        Pop-Location
+
+        Write-Host "Pulled latest from repository into $CloneRoot" -ForegroundColor Green
     }
 
     # Step 10: Mark workspace as complete
@@ -1973,11 +1932,7 @@ function New-QueClone {
     # Mark clone as complete
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"
 
-    Write-Host "`nClone created: $CloneName" -ForegroundColor Green
-    Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  1. Create your Unreal Engine project in: $CloneRoot" -ForegroundColor White
-    Write-Host "  2. Add and commit your files with git" -ForegroundColor White
-    Write-Host "  3. Push to GitHub when ready" -ForegroundColor White
+    return $CloneRoot
 }
 
 # ----------------------------------------------------------------------------
@@ -2363,11 +2318,10 @@ function Invoke-QueMain {
 
     # MODE 1: DOT-SOURCED
     if ($IsDotSourced) {
-        Write-Host "QUE 5.7 commands loaded" -ForegroundColor Green
+        Write-Host "QUE commands loaded" -ForegroundColor Green
         return
     }
 
-    ###QUE_CREATION_MODE_BEGIN###
     # MODE 2: RUN FROM URL - Workspace/Clone Creation
     if ($IsRunFromUrl) {
         # Extract GitHub info from URL (if available)
@@ -2402,7 +2356,7 @@ function Invoke-QueMain {
                 } else {
                     # Mode 2B: Error - mismatched workspace
                     Write-Error "Current workspace is for $ExistingOwner/$ExistingRepo, but you're trying to create $UrlOwner/$UrlRepo"
-                    Write-Host "Please run this command in a folder outside this workspace to create a new workspace." -ForegroundColor Yellow
+                    Write-Host "Please run this command in a folder outside this workspace to create a new workspace, or within a $UrlRepo workspace to create a new clone." -ForegroundColor Yellow
                     return
                 }
             } else {
@@ -2423,6 +2377,7 @@ function Invoke-QueMain {
             $WorkspaceRoot = Get-Location
 
             if ($IsBootstrapScript) {
+                ###QUE_CREATION_MODE_BEGIN###
                 # Bootstrap mode - prompt for new repo name with default
                 Write-Host "Setting up a new workspace...`n" -ForegroundColor Green
 
@@ -2459,6 +2414,7 @@ function Invoke-QueMain {
 
                 # Create new workspace with initialization options
                 New-QueWorkspace -GitHubOwner $GitHubOwner -GitHubRepo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo
+                ###QUE_CREATION_MODE_END###
             } elseif ($UrlOwner -and $UrlRepo) {
                 # Joining existing project - use URL owner/repo
                 Write-Host "Joining project: $UrlOwner/$UrlRepo`n" -ForegroundColor Green
@@ -2483,95 +2439,92 @@ function Invoke-QueMain {
                 return
             }
         }
-    }
-    ###QUE_CREATION_MODE_END###
+    } else {
 
-    # MODE 3: DIRECT EXECUTION - Management Terminal
-    # (Commented out in que57.ps1, uncommented in que-repo-name.ps1)
-    ###QUE_DIRECT_EXEC_BEGIN###
-    # if ($IsDirectExecution) {
-    #     # Find workspace and clone
-    #     $WorkspaceRoot = Find-QueWorkspace
-    #     if (-not $WorkspaceRoot) {
-    #         Write-Error "Not in a QUE workspace. Run this script via iex (iwr ...) to create one."
-    #         return
-    #     }
-    #
-    #     # Ensure SyncThing is running
-    #     Write-Host "Ensuring SyncThing is running..." -ForegroundColor Cyan
-    #     $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
-    #
-    #     # Ensure current device is in SyncThing devices list
-    #     $CurrentDeviceId = $SyncThingInfo.DeviceId
-    #     if ($SyncThingDevices -and -not $SyncThingDevices.ContainsValue($CurrentDeviceId)) {
-    #         Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
-    #
-    #         # Add to dictionary
-    #         $SyncThingDevices[$env:COMPUTERNAME] = $CurrentDeviceId
-    #
-    #         # Rewrite this script with updated devices
-    #         $ScriptPath = $PSCommandPath
-    #         $ScriptContent = Get-Content $ScriptPath -Raw
-    #
-    #         # Rebuild SyncThing block
-    #         $DevicesEntries = $SyncThingDevices.GetEnumerator() | ForEach-Object {
-    #             "    `"$($_.Key)`" = `"$($_.Value)`""
-    #         }
-    #         $DevicesBlock = "@{`n" + ($DevicesEntries -join "`n") + "`n}"
-    #
-    #         $NewSyncThingBlock = @"
-# ###QUE_SYNCTHING_BEGIN###
-# `$SyncThingDevices = $DevicesBlock
-# ###QUE_SYNCTHING_END###
-# "@
-    #
-    #         $UpdatedContent = $ScriptContent -replace '###QUE_SYNCTHING_BEGIN###[\s\S]*?###QUE_SYNCTHING_END###', $NewSyncThingBlock
-    #
-    #         Set-Content -Path $ScriptPath -Value $UpdatedContent -Encoding UTF8
-    #
-    #         Write-Host "Script updated with current device. Please commit this change to share with team." -ForegroundColor Green
-    #     }
-    #
-    #     # Configure SyncThing with all known devices
-    #     if ($SyncThingDevices -and $SyncThingDevices.Count -gt 0) {
-    #         Update-SyncThingDevices -WorkspaceRoot $WorkspaceRoot -Devices $SyncThingDevices -SyncThingInfo $SyncThingInfo
-    #     }
-    #
-    #     # Detect which clone we're in by checking the script location
-    #     $ScriptPath = $PSCommandPath
-    #     $CloneRoot = Split-Path $ScriptPath -Parent
-    #     $CloneName = Split-Path $CloneRoot -Leaf
-    #
-    #     # Check if user created UE project and auto-generate git config files if needed
-    #     Write-UEGitConfigFiles -CloneRoot $CloneRoot
-    #
-    #     # Display header
-    #     Write-Host "`n===============================================================" -ForegroundColor Cyan
-    #     Write-Host "  QUE - $GitHubOwner/$GitHubRepo" -ForegroundColor Green
-    #     Write-Host "  Clone: $CloneName" -ForegroundColor Yellow
-    #     Write-Host "===============================================================`n" -ForegroundColor Cyan
-    #
-    #     # Command loop
-    #     while ($true) {
-    #         Write-Host "Commands: " -NoNewline -ForegroundColor White
-    #         Write-Host "open, build, clean, pull, push, package, info, exit" -ForegroundColor Gray
-    #         $Command = Read-Host "`nQUE>"
-    #
-    #         switch ($Command.ToLower()) {
-    #             "open"    { Open-UnrealProject }
-    #             "build"   { Build-UnrealProject }
-    #             "clean"   { Clean-UnrealProject }
-    #             "pull"    { Pull-FromGitHub }
-    #             "push"    { Push-ToGitHub }
-    #             "package" { Package-UnrealProject }
-    #             "info"    { Show-WorkspaceInfo }
-    #             "exit"    { return }
-    #             ""        { continue }
-    #             default   { Write-Host "Unknown command: $Command" -ForegroundColor Red }
-    #         }
-    #     }
-    # }
-    ###QUE_DIRECT_EXEC_END###
+        # MODE 3: DIRECT EXECUTION - Management Terminal
+        if ($IsDirectExecution) {
+            # Find workspace and clone
+            $WorkspaceRoot = Find-QueWorkspace
+            if (-not $WorkspaceRoot) {
+                Write-Error "Not in a QUE workspace. Run this script via iex (iwr ...) to create one."
+                return
+            }
+        
+            # Ensure SyncThing is running
+            Write-Host "Ensuring SyncThing is running..." -ForegroundColor Cyan
+            $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
+        
+            # Ensure current device is in SyncThing devices list
+            $CurrentDeviceId = $SyncThingInfo.DeviceId
+            if ($SyncThingDevices -and -not $SyncThingDevices.ContainsValue($CurrentDeviceId)) {
+                Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
+        
+                # Add to dictionary
+                $SyncThingDevices[$env:COMPUTERNAME] = $CurrentDeviceId
+        
+                # Rewrite this script with updated devices
+                $ScriptPath = $PSCommandPath
+                $ScriptContent = Get-Content $ScriptPath -Raw
+        
+                # Rebuild SyncThing block
+                $DevicesEntries = $SyncThingDevices.GetEnumerator() | ForEach-Object {
+                    "    `"$($_.Key)`" = `"$($_.Value)`""
+                }
+                $DevicesBlock = "@{`n" + ($DevicesEntries -join "`n") + "`n}"
+        
+                $NewSyncThingBlock = @"
+{0}QUE_SYNCTHING_BEGIN{0}
+`$SyncThingDevices = {1}
+{0}QUE_SYNCTHING_END{0}
+"@ -f @('###', $DevicesBlock)
+
+                $UpdatedContent = $ScriptContent -replace ('{0}QUE_SYNCTHING_BEGIN{0}[\s\S]*?{0}QUE_SYNCTHING_END{0}' -f @('###')), $NewSyncThingBlock
+        
+                Set-Content -Path $ScriptPath -Value $UpdatedContent -Encoding UTF8
+        
+                Write-Host "Script updated with current device. Please commit this change to share with team." -ForegroundColor Green
+            }
+        
+            # Configure SyncThing with all known devices
+            if ($SyncThingDevices -and $SyncThingDevices.Count -gt 0) {
+                Update-SyncThingDevices -WorkspaceRoot $WorkspaceRoot -Devices $SyncThingDevices -SyncThingInfo $SyncThingInfo
+            }
+        
+            # Detect which clone we're in by checking the script location
+            $ScriptPath = $PSCommandPath
+            $CloneRoot = Split-Path $ScriptPath -Parent
+            $CloneName = Split-Path $CloneRoot -Leaf
+        
+            # Check if user created UE project and auto-generate git config files if needed
+            Write-UEGitConfigFiles -CloneRoot $CloneRoot
+        
+            # Display header
+            Write-Host "`n===============================================================" -ForegroundColor Cyan
+            Write-Host "  QUE - $GitHubOwner/$GitHubRepo" -ForegroundColor Green
+            Write-Host "  Clone: $CloneName" -ForegroundColor Yellow
+            Write-Host "===============================================================`n" -ForegroundColor Cyan
+        
+            # Command loop
+            while ($true) {
+                Write-Host "Commands: " -NoNewline -ForegroundColor White
+                Write-Host "open, build, clean, pull, push, package, info, exit" -ForegroundColor Gray
+                $Command = Read-Host "`nQUE>"
+        
+                switch ($Command.ToLower()) {
+                    "open"    { Open-UnrealProject }
+                    "build"   { Build-UnrealProject }
+                    "clean"   { Clean-UnrealProject }
+                    "pull"    { Pull-FromGitHub }
+                    "push"    { Push-ToGitHub }
+                    "package" { Package-UnrealProject }
+                    "info"    { Show-WorkspaceInfo }
+                    "exit"    { return }
+                    ""        { continue }
+                    default   { Write-Host "Unknown command: $Command" -ForegroundColor Red }
+                }
+            }
+        }
+    }
 }
 
 # ----------------------------------------------------------------------------
