@@ -35,26 +35,15 @@ New-Item -ItemType Directory -Force -Path $WorkspaceB | Out-Null
 Write-Host "  Workspace A: $WorkspaceA" -ForegroundColor Gray
 Write-Host "  Workspace B: $WorkspaceB" -ForegroundColor Gray
 
-# Prompt for GitHub PAT
+# GitHub PAT reminder
 Write-Host "`n=============================================================" -ForegroundColor Cyan
 Write-Host "  GitHub Authentication" -ForegroundColor Green
 Write-Host "=============================================================" -ForegroundColor Cyan
 Write-Host "`nYou will need a GitHub Personal Access Token with 'repo' scope."
-Write-Host "Visit: https://github.com/settings/tokens`n" -ForegroundColor Gray
-
-$SecurePAT = Read-Host "Enter your GitHub Personal Access Token" -AsSecureString
-$BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePAT)
-$PlainPAT = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-[System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-
-if ([string]::IsNullOrWhiteSpace($PlainPAT)) {
-    Write-Error "PAT cannot be empty"
-    exit 1
-}
-
-# Get QUE bootstrap script URL
-$QueScriptUrl = "https://raw.githubusercontent.com/karlgluck/que/main/que57.ps1"
-Write-Host "`nUsing QUE bootstrap URL: $QueScriptUrl" -ForegroundColor Gray
+Write-Host "Visit: https://github.com/settings/tokens" -ForegroundColor Gray
+Write-Host "`nYou will be prompted to enter it in each workspace." -ForegroundColor Yellow
+Write-Host "Press ENTER to continue..." -ForegroundColor Gray
+Read-Host
 
 # ============================================================
 # WORKSPACE A: Create new project
@@ -62,27 +51,15 @@ Write-Host "`nUsing QUE bootstrap URL: $QueScriptUrl" -ForegroundColor Gray
 Write-Host "`n=============================================================" -ForegroundColor Cyan
 Write-Host "  WORKSPACE A: Creating New Project" -ForegroundColor Green
 Write-Host "=============================================================" -ForegroundColor Cyan
-Write-Host "`nRepository name: $TestRepoName" -ForegroundColor Yellow
+Write-Host "`nRepository name to use: " -NoNewline -ForegroundColor Yellow
+Write-Host "$TestRepoName" -ForegroundColor White
 Write-Host "Workspace path: $WorkspaceA`n" -ForegroundColor Gray
 
-Write-Host "Starting Workspace A creation..." -ForegroundColor Cyan
-Write-Host "(This will create the GitHub repository and set up the workspace)`n" -ForegroundColor Gray
-
-# Create temporary bootstrap script for Workspace A
-$TempScriptA = Join-Path $WorkspaceA "setup-temp.ps1"
-$BootstrapCommandA = @"
-Set-ExecutionPolicy Bypass -Scope Process -Force
-Set-Location '$WorkspaceA'
-`$quePlainPAT = '$PlainPAT'
-iex ((iwr -Headers @{Authorization = "token `$quePlainPAT"} -Uri '$QueScriptUrl').Content)
-"@
-Set-Content -Path $TempScriptA -Value $BootstrapCommandA -Encoding UTF8
-
-# Execute in new PowerShell window for Workspace A
-Write-Host "Launching Workspace A setup in new window..." -ForegroundColor Yellow
+# Open PowerShell in Workspace A
+Write-Host "Opening PowerShell window for Workspace A..." -ForegroundColor Cyan
 $StartProcessArgs = @{
     FilePath = 'powershell'
-    ArgumentList = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$TempScriptA`"")
+    ArgumentList = @('-NoExit', '-Command', "Set-Location '$WorkspaceA'")
     PassThru = $true
 }
 $ProcessA = Start-Process @StartProcessArgs
@@ -90,10 +67,14 @@ $ProcessA = Start-Process @StartProcessArgs
 Write-Host "`n=============================================================" -ForegroundColor Cyan
 Write-Host "  INSTRUCTIONS FOR WORKSPACE A" -ForegroundColor Yellow
 Write-Host "=============================================================" -ForegroundColor Cyan
-Write-Host "1. In the new PowerShell window, enter the repo name: $TestRepoName" -ForegroundColor White
-Write-Host "2. Wait for the workspace creation to complete" -ForegroundColor White
-Write-Host "3. Dependencies will be installed (this may take several minutes)" -ForegroundColor White
-Write-Host "4. When complete, return to this window`n" -ForegroundColor White
+Write-Host "`n1. In the new PowerShell window, paste this command:" -ForegroundColor White
+Write-Host "`n   " -NoNewline
+Write-Host "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex (`$queScript = (iwr -Headers @{Authorization = `"token `$(`$quePlainPAT = Read-Host 'Enter Personal Access Token';`$quePlainPAT)`"} -Uri (`$queUrl = `"https://raw.githubusercontent.com/karlgluck/que/main/que57.ps1`")).Content)" -ForegroundColor Cyan
+Write-Host "`n2. When prompted for PAT, enter your GitHub token" -ForegroundColor White
+Write-Host "3. When prompted for repository name, enter: " -NoNewline -ForegroundColor White
+Write-Host "$TestRepoName" -ForegroundColor Yellow
+Write-Host "4. Wait for workspace creation to complete (dependencies will install)" -ForegroundColor White
+Write-Host "5. When finished, return to this window`n" -ForegroundColor White
 
 Read-Host "Press ENTER when Workspace A setup is complete and you're ready to continue"
 
@@ -105,40 +86,11 @@ Write-Host "  WORKSPACE B: Joining Existing Project" -ForegroundColor Green
 Write-Host "=============================================================" -ForegroundColor Cyan
 Write-Host "`nWorkspace path: $WorkspaceB`n" -ForegroundColor Gray
 
-# Get GitHub username for the project URL
-Write-Host "Fetching GitHub username..." -ForegroundColor Cyan
-try {
-    $AuthHeaders = @{
-        Authorization = "token $PlainPAT"
-        'Cache-Control' = 'no-store'
-    }
-    $UserResponse = Invoke-WebRequest -Uri 'https://api.github.com/user' -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop
-    $UserInfo = $UserResponse.Content | ConvertFrom-Json
-    $GitHubOwner = $UserInfo.login
-    Write-Host "GitHub Owner: $GitHubOwner" -ForegroundColor Green
-} catch {
-    Write-Error "Failed to get GitHub user info: $($_.Exception.Message)"
-    exit 1
-}
-
-$ProjectScriptUrl = "https://raw.githubusercontent.com/$GitHubOwner/$TestRepoName/main/que-$TestRepoName.ps1"
-Write-Host "Project script URL: $ProjectScriptUrl`n" -ForegroundColor Gray
-
-# Create temporary bootstrap script for Workspace B
-$TempScriptB = Join-Path $WorkspaceB "setup-temp.ps1"
-$BootstrapCommandB = @"
-Set-ExecutionPolicy Bypass -Scope Process -Force
-Set-Location '$WorkspaceB'
-`$quePlainPAT = '$PlainPAT'
-iex ((iwr -Headers @{Authorization = "token `$quePlainPAT"} -Uri '$ProjectScriptUrl').Content)
-"@
-Set-Content -Path $TempScriptB -Value $BootstrapCommandB -Encoding UTF8
-
-# Execute in new PowerShell window for Workspace B
-Write-Host "Launching Workspace B setup in new window..." -ForegroundColor Yellow
+# Open PowerShell in Workspace B
+Write-Host "Opening PowerShell window for Workspace B..." -ForegroundColor Cyan
 $StartProcessArgs = @{
     FilePath = 'powershell'
-    ArgumentList = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$TempScriptB`"")
+    ArgumentList = @('-NoExit', '-Command', "Set-Location '$WorkspaceB'")
     PassThru = $true
 }
 $ProcessB = Start-Process @StartProcessArgs
@@ -146,9 +98,14 @@ $ProcessB = Start-Process @StartProcessArgs
 Write-Host "`n=============================================================" -ForegroundColor Cyan
 Write-Host "  INSTRUCTIONS FOR WORKSPACE B" -ForegroundColor Yellow
 Write-Host "=============================================================" -ForegroundColor Cyan
-Write-Host "1. The new window will automatically join the project" -ForegroundColor White
-Write-Host "2. Wait for the workspace setup to complete" -ForegroundColor White
-Write-Host "3. When finished, both workspaces should be ready`n" -ForegroundColor White
+Write-Host "`n1. In the new PowerShell window, go to the GitHub repo:" -ForegroundColor White
+Write-Host "   https://github.com/YOUR-USERNAME/$TestRepoName" -ForegroundColor Gray
+Write-Host "`n2. Copy the bootstrap command from the README.md" -ForegroundColor White
+Write-Host "   (It will look like the one-liner from Workspace A)" -ForegroundColor Gray
+Write-Host "`n3. Paste and run it in the Workspace B PowerShell window" -ForegroundColor White
+Write-Host "`n4. When prompted for PAT, enter your GitHub token" -ForegroundColor White
+Write-Host "`n5. Wait for workspace setup to complete" -ForegroundColor White
+Write-Host "`n6. When finished, both workspaces should be ready`n" -ForegroundColor White
 
 # ============================================================
 # Summary and Next Steps
@@ -156,28 +113,30 @@ Write-Host "3. When finished, both workspaces should be ready`n" -ForegroundColo
 Write-Host "`n=============================================================" -ForegroundColor Cyan
 Write-Host "  Test Deployment Summary" -ForegroundColor Green
 Write-Host "=============================================================" -ForegroundColor Cyan
-Write-Host "`nTest Repository: $GitHubOwner/$TestRepoName" -ForegroundColor Yellow
+Write-Host "`nTest Repository Name: $TestRepoName" -ForegroundColor Yellow
 Write-Host "`nWorkspace Locations:" -ForegroundColor Yellow
 Write-Host "  A: $WorkspaceA" -ForegroundColor White
 Write-Host "  B: $WorkspaceB" -ForegroundColor White
 
-Write-Host "`nLaunch Management Terminals:" -ForegroundColor Yellow
-$CloneNamePattern = (Get-Date -Format "yyyy-MM-dd") + "-*"
-Write-Host "  Workspace A: Run the .lnk shortcut in $WorkspaceA" -ForegroundColor White
-Write-Host "  Workspace B: Run the .lnk shortcut in $WorkspaceB" -ForegroundColor White
+Write-Host "`nNext Steps:" -ForegroundColor Yellow
+Write-Host "`n1. Complete setup in both PowerShell windows" -ForegroundColor White
+Write-Host "`n2. Launch Management Terminals:" -ForegroundColor White
+Write-Host "   - Workspace A: Run the .lnk shortcut in $WorkspaceA" -ForegroundColor Gray
+Write-Host "   - Workspace B: Run the .lnk shortcut in $WorkspaceB" -ForegroundColor Gray
 
-Write-Host "`nTesting Device Synchronization:" -ForegroundColor Yellow
-Write-Host "  1. Run the management script in Workspace A" -ForegroundColor White
-Write-Host "  2. Check the DEBUG output for device IDs" -ForegroundColor White
-Write-Host "  3. Run the management script in Workspace B" -ForegroundColor White
-Write-Host "  4. Verify Workspace B sees Workspace A's device ID" -ForegroundColor White
-Write-Host "  5. Use 'push' command to commit changes" -ForegroundColor White
-Write-Host "  6. Use 'pull' command in other workspace to sync" -ForegroundColor White
+Write-Host "`n3. Test Device Synchronization:" -ForegroundColor White
+Write-Host "   a. Run the management script in Workspace A" -ForegroundColor Gray
+Write-Host "   b. Check the DEBUG output for device IDs" -ForegroundColor Gray
+Write-Host "   c. Run the management script in Workspace B" -ForegroundColor Gray
+Write-Host "   d. Verify Workspace B sees Workspace A's device ID in DEBUG output" -ForegroundColor Gray
+Write-Host "   e. Verify count shows 2 devices after adding" -ForegroundColor Gray
+Write-Host "   f. Use 'push' command to commit changes" -ForegroundColor Gray
+Write-Host "   g. Use 'pull' command in other workspace to sync" -ForegroundColor Gray
 
-Write-Host "`nCleanup:" -ForegroundColor Yellow
-Write-Host "  - Delete test directory: $TestRoot" -ForegroundColor White
-Write-Host "  - Delete GitHub repo at: https://github.com/$GitHubOwner/$TestRepoName" -ForegroundColor White
+Write-Host "`n4. Cleanup When Done:" -ForegroundColor White
+Write-Host "   - Delete test directory: $TestRoot" -ForegroundColor Gray
+Write-Host "   - Delete GitHub repo at: https://github.com/YOUR-USERNAME/$TestRepoName" -ForegroundColor Gray
 
 Write-Host "`n=============================================================" -ForegroundColor Cyan
-Write-Host "Test environment ready! Check the PowerShell windows." -ForegroundColor Green
+Write-Host "Test environment ready! Follow the steps above." -ForegroundColor Green
 Write-Host "=============================================================`n" -ForegroundColor Cyan
