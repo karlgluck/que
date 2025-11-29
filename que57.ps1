@@ -225,7 +225,7 @@ QUE is a single-file PowerShell solution for managing Unreal Engine projects wit
 # SYNCTHING DEVICES (only in que-repo-name.ps1)
 # ----------------------------------------------------------------------------
 ###QUE_SYNCTHING_BEGIN###
-# $SyncThingDevices = @{}  # Embedded in que-repo-name.ps1 only
+# $SyncThingDevices = @()  # Embedded in que-repo-name.ps1 only (array of device IDs)
 ###QUE_SYNCTHING_END###
 
 # ----------------------------------------------------------------------------
@@ -1048,16 +1048,16 @@ function Update-SyncThingDevices {
     .SYNOPSIS
         Adds known devices to SyncThing configuration
     .DESCRIPTION
-        Queries existing devices and only adds new ones from $SyncThingDevices hashtable
+        Queries existing devices and only adds new ones from $SyncThingDevices array
         Uses syncthing cli to check existing devices before adding
     #>
     param(
         [string]$WorkspaceRoot,
-        [hashtable]$Devices,
+        [array]$DeviceIds,
         [hashtable]$SyncThingInfo
     )
 
-    if ($Devices.Count -eq 0) {
+    if ($DeviceIds.Count -eq 0) {
         Write-Host "No additional devices to configure" -ForegroundColor Yellow
         return
     }
@@ -1077,12 +1077,9 @@ function Update-SyncThingDevices {
     $AllKnownDeviceIds = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>$null
 
     # Add any new devices that aren't already configured
-    foreach ($Device in $Devices.GetEnumerator()) {
-        $DeviceName = $Device.Key
-        $DeviceId = $Device.Value
-
+    foreach ($DeviceId in $DeviceIds) {
         if ($DeviceId -and $AllKnownDeviceIds -notcontains $DeviceId) {
-            Write-Host "Adding $DeviceName as SyncThing peer $DeviceId" -ForegroundColor Green
+            Write-Host "Adding SyncThing peer: $DeviceId" -ForegroundColor Green
 
             $CliArgs = @(
                 "cli"
@@ -1093,12 +1090,11 @@ function Update-SyncThingDevices {
                 "devices"
                 "add"
                 "--device-id=$DeviceId"
-                "--name=$DeviceName"
                 "--auto-accept-folders"
             )
             & $SyncThingExe @CliArgs
         } else {
-            Write-Host "Device $DeviceName ($DeviceId) already configured, skipping" -ForegroundColor Gray
+            Write-Host "Device $DeviceId already configured, skipping" -ForegroundColor Gray
         }
     }
 
@@ -1276,15 +1272,15 @@ $($ThreeHashes)QUE_CONSTANTS_END$($ThreeHashes)
     if ($SyncThingDeviceId) {
         $SyncThingBlock = @"
 $($ThreeHashes)QUE_SYNCTHING_BEGIN$($ThreeHashes)
-`$SyncThingDevices = @{
-    "$env:COMPUTERNAME" = "$SyncThingDeviceId"
-}
+`$SyncThingDevices = @(
+    "$SyncThingDeviceId"
+)
 $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
 "@
     } else {
         $SyncThingBlock = @"
 $($ThreeHashes)QUE_SYNCTHING_BEGIN$($ThreeHashes)
-`$SyncThingDevices = @{}
+`$SyncThingDevices = @()
 $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
 "@
     }
@@ -2256,8 +2252,8 @@ function Show-WorkspaceInfo {
     if ($SyncThingRunning) {
         Write-Host "  Status: Running"
         Write-Host "  Devices: $($SyncThingDevices.Count)"
-        foreach ($Device in $SyncThingDevices.GetEnumerator()) {
-            Write-Host "    - $($Device.Key): $($Device.Value)"
+        foreach ($DeviceId in $SyncThingDevices) {
+            Write-Host "    - $DeviceId"
         }
     } else {
         Write-Host "  Status: Not running"
@@ -2420,22 +2416,22 @@ function Invoke-QueMain {
         
             # Ensure current device is in SyncThing devices list
             $CurrentDeviceId = $SyncThingInfo.DeviceId
-            if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $SyncThingDevices -and (-not $SyncThingDevices.ContainsValue($CurrentDeviceId))) {
+            if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $SyncThingDevices -and ($SyncThingDevices -notcontains $CurrentDeviceId)) {
                 Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
 
-                # Add to dictionary
-                $SyncThingDevices[$env:COMPUTERNAME] = $CurrentDeviceId
-        
+                # Add to array
+                $SyncThingDevices += $CurrentDeviceId
+
                 # Rewrite this script with updated devices
                 $ScriptPath = $PSCommandPath
                 $ScriptContent = Get-Content $ScriptPath -Raw
-        
+
                 # Rebuild SyncThing block
-                $DevicesEntries = $SyncThingDevices.GetEnumerator() | ForEach-Object {
-                    "    `"$($_.Key)`" = `"$($_.Value)`""
+                $DevicesEntries = $SyncThingDevices | ForEach-Object {
+                    "    `"$_`""
                 }
-                $DevicesBlock = "@{`n" + ($DevicesEntries -join "`n") + "`n}"
-        
+                $DevicesBlock = "@(`n" + ($DevicesEntries -join ",`n") + "`n)"
+
                 $NewSyncThingBlock = @"
 {0}QUE_SYNCTHING_BEGIN{0}
 `$SyncThingDevices = {1}
@@ -2443,15 +2439,15 @@ function Invoke-QueMain {
 "@ -f @('###', $DevicesBlock)
 
                 $UpdatedContent = $ScriptContent -replace ('{0}QUE_SYNCTHING_BEGIN{0}[\s\S]*?{0}QUE_SYNCTHING_END{0}' -f @('###')), $NewSyncThingBlock
-        
+
                 Set-Content -Path $ScriptPath -Value $UpdatedContent -Encoding UTF8
-        
+
                 Write-Host "Script updated with current device. Please commit this change to share with team." -ForegroundColor Green
             }
-        
+
             # Configure SyncThing with all known devices
             if ($SyncThingDevices -and $SyncThingDevices.Count -gt 0) {
-                Update-SyncThingDevices -WorkspaceRoot $WorkspaceRoot -Devices $SyncThingDevices -SyncThingInfo $SyncThingInfo
+                Update-SyncThingDevices -WorkspaceRoot $WorkspaceRoot -DeviceIds $SyncThingDevices -SyncThingInfo $SyncThingInfo
             }
         
             # Detect which clone we're in by checking the script location
