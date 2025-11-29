@@ -1292,8 +1292,8 @@ $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
     $ScriptContent = $ScriptContent -replace ('{0}QUE_EMBEDDED_FILES_BEGIN{0}[\s\S]*?{0}QUE_EMBEDDED_FILES_END{0}' -f @($ThreeHashes)), ''
 
     # 4. Uncomment management mode code
-    $ScriptContent = $ScriptContent -replace ('<#{0}QUE_MANAGEMENT_MODE_BEGIN{0}' -f @($ThreeHashes))
-    $ScriptContent = $ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes))
+    $ScriptContent = $ScriptContent -replace ('<#{0}QUE_MANAGEMENT_MODE_BEGIN{0}' -f @($ThreeHashes)), ''
+    $ScriptContent = $ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes)), ''
 
     # Write the generated script
     Set-Content -Path $OutputPath -Value $ScriptContent -Encoding UTF8
@@ -2419,8 +2419,17 @@ function Invoke-QueMain {
             if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $SyncThingDevices -and ($SyncThingDevices -notcontains $CurrentDeviceId)) {
                 Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
 
+                # DEBUG: Show what we have before adding
+                Write-Host "DEBUG: Current device ID: $CurrentDeviceId" -ForegroundColor Magenta
+                Write-Host "DEBUG: SyncThingDevices before adding: $($SyncThingDevices -join ', ')" -ForegroundColor Magenta
+                Write-Host "DEBUG: Count before: $($SyncThingDevices.Count)" -ForegroundColor Magenta
+
                 # Add to array
                 $SyncThingDevices += $CurrentDeviceId
+
+                # DEBUG: Show what we have after adding
+                Write-Host "DEBUG: SyncThingDevices after adding: $($SyncThingDevices -join ', ')" -ForegroundColor Magenta
+                Write-Host "DEBUG: Count after: $($SyncThingDevices.Count)" -ForegroundColor Magenta
 
                 # Rewrite this script with updated devices
                 $ScriptPath = $PSCommandPath
@@ -2462,6 +2471,7 @@ function Invoke-QueMain {
             Write-Host "`n===============================================================" -ForegroundColor Cyan
             Write-Host "  QUE - $GitHubOwner/$GitHubRepo" -ForegroundColor Green
             Write-Host "  Clone: $CloneName" -ForegroundColor Yellow
+            Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
             Write-Host "===============================================================`n" -ForegroundColor Cyan
         
             # Command loop
