@@ -932,7 +932,7 @@ function Ensure-SyncThingRunning {
         Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
 
         # Open browser to existing instance
-        & $SyncThingExe browser --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey"
+        & $SyncThingExe browser --home="$SyncThingHome"
     }
 
     # Get device ID using CLI
