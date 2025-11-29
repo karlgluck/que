@@ -932,7 +932,7 @@ function Ensure-SyncThingRunning {
         Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
 
         # Open browser to existing instance
-        & $SyncThingExe --browser-only --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey"
+        & $SyncThingExe browser --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey"
     }
 
     # Get device ID using CLI
@@ -2308,7 +2308,7 @@ function Invoke-QueMain {
                 if ($ExistingOwner -eq $UrlOwner -and $ExistingRepo -eq $UrlRepo) {
                     # Mode 2A: Create new clone in matching workspace
                     Write-Host "Found matching workspace at: $WorkspaceRoot" -ForegroundColor Green
-                    New-QueClone -WorkspaceRoot $WorkspaceRoot
+                    New-QueClone -WorkspaceRoot $WorkspaceRoot -ShouldClone $true
                 } else {
                     # Mode 2B: Error - mismatched workspace
                     Write-Error "Current workspace is for $ExistingOwner/$ExistingRepo, but you're trying to create $UrlOwner/$UrlRepo"
