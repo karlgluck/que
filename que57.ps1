@@ -2251,8 +2251,8 @@ function Show-WorkspaceInfo {
     $SyncThingRunning = Get-Process syncthing -ErrorAction SilentlyContinue
     if ($SyncThingRunning) {
         Write-Host "  Status: Running"
-        Write-Host "  Devices: $($SyncThingDevices.Count)"
-        foreach ($DeviceId in $SyncThingDevices) {
+        Write-Host "  Devices: $($script:SyncThingDevices.Count)"
+        foreach ($DeviceId in $script:SyncThingDevices) {
             Write-Host "    - $DeviceId"
         }
     } else {
@@ -2416,27 +2416,27 @@ function Invoke-QueMain {
         
             # Ensure current device is in SyncThing devices list
             $CurrentDeviceId = $SyncThingInfo.DeviceId
-            if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $SyncThingDevices -and ($SyncThingDevices -notcontains $CurrentDeviceId)) {
+            if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $script:SyncThingDevices -and ($script:SyncThingDevices -notcontains $CurrentDeviceId)) {
                 Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
 
                 # DEBUG: Show what we have before adding
                 Write-Host "DEBUG: Current device ID: $CurrentDeviceId" -ForegroundColor Magenta
-                Write-Host "DEBUG: SyncThingDevices before adding: $($SyncThingDevices -join ', ')" -ForegroundColor Magenta
-                Write-Host "DEBUG: Count before: $($SyncThingDevices.Count)" -ForegroundColor Magenta
+                Write-Host "DEBUG: SyncThingDevices before adding: $($script:SyncThingDevices -join ', ')" -ForegroundColor Magenta
+                Write-Host "DEBUG: Count before: $($script:SyncThingDevices.Count)" -ForegroundColor Magenta
 
-                # Add to array
-                $SyncThingDevices += $CurrentDeviceId
+                # Add to array (use script scope to modify the script-level variable)
+                $script:SyncThingDevices += $CurrentDeviceId
 
                 # DEBUG: Show what we have after adding
-                Write-Host "DEBUG: SyncThingDevices after adding: $($SyncThingDevices -join ', ')" -ForegroundColor Magenta
-                Write-Host "DEBUG: Count after: $($SyncThingDevices.Count)" -ForegroundColor Magenta
+                Write-Host "DEBUG: SyncThingDevices after adding: $($script:SyncThingDevices -join ', ')" -ForegroundColor Magenta
+                Write-Host "DEBUG: Count after: $($script:SyncThingDevices.Count)" -ForegroundColor Magenta
 
                 # Rewrite this script with updated devices
                 $ScriptPath = $PSCommandPath
                 $ScriptContent = Get-Content $ScriptPath -Raw
 
                 # Rebuild SyncThing block
-                $DevicesEntries = $SyncThingDevices | ForEach-Object {
+                $DevicesEntries = $script:SyncThingDevices | ForEach-Object {
                     "    `"$_`""
                 }
                 $DevicesBlock = "@(`n" + ($DevicesEntries -join ",`n") + "`n)"
@@ -2455,8 +2455,8 @@ function Invoke-QueMain {
             }
 
             # Configure SyncThing with all known devices
-            if ($SyncThingDevices -and $SyncThingDevices.Count -gt 0) {
-                Update-SyncThingDevices -WorkspaceRoot $WorkspaceRoot -DeviceIds $SyncThingDevices -SyncThingInfo $SyncThingInfo
+            if ($script:SyncThingDevices -and $script:SyncThingDevices.Count -gt 0) {
+                Update-SyncThingDevices -WorkspaceRoot $WorkspaceRoot -DeviceIds $script:SyncThingDevices -SyncThingInfo $SyncThingInfo
             }
         
             # Detect which clone we're in by checking the script location
