@@ -68,17 +68,24 @@ Write-Host "Workspace path: $WorkspaceA`n" -ForegroundColor Gray
 Write-Host "Starting Workspace A creation..." -ForegroundColor Cyan
 Write-Host "(This will create the GitHub repository and set up the workspace)`n" -ForegroundColor Gray
 
-# Build the bootstrap command for Workspace A
+# Create temporary bootstrap script for Workspace A
+$TempScriptA = Join-Path $WorkspaceA "setup-temp.ps1"
 $BootstrapCommandA = @"
 Set-ExecutionPolicy Bypass -Scope Process -Force
 Set-Location '$WorkspaceA'
 `$quePlainPAT = '$PlainPAT'
 iex ((iwr -Headers @{Authorization = "token `$quePlainPAT"} -Uri '$QueScriptUrl').Content)
 "@
+Set-Content -Path $TempScriptA -Value $BootstrapCommandA -Encoding UTF8
 
 # Execute in new PowerShell window for Workspace A
 Write-Host "Launching Workspace A setup in new window..." -ForegroundColor Yellow
-$ProcessA = Start-Process powershell -ArgumentList "-NoExit", "-Command", $BootstrapCommandA -PassThru
+$StartProcessArgs = @{
+    FilePath = 'powershell'
+    ArgumentList = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$TempScriptA`"")
+    PassThru = $true
+}
+$ProcessA = Start-Process @StartProcessArgs
 
 Write-Host "`n=============================================================" -ForegroundColor Cyan
 Write-Host "  INSTRUCTIONS FOR WORKSPACE A" -ForegroundColor Yellow
@@ -117,17 +124,24 @@ try {
 $ProjectScriptUrl = "https://raw.githubusercontent.com/$GitHubOwner/$TestRepoName/main/que-$TestRepoName.ps1"
 Write-Host "Project script URL: $ProjectScriptUrl`n" -ForegroundColor Gray
 
-# Build the bootstrap command for Workspace B
+# Create temporary bootstrap script for Workspace B
+$TempScriptB = Join-Path $WorkspaceB "setup-temp.ps1"
 $BootstrapCommandB = @"
 Set-ExecutionPolicy Bypass -Scope Process -Force
 Set-Location '$WorkspaceB'
 `$quePlainPAT = '$PlainPAT'
 iex ((iwr -Headers @{Authorization = "token `$quePlainPAT"} -Uri '$ProjectScriptUrl').Content)
 "@
+Set-Content -Path $TempScriptB -Value $BootstrapCommandB -Encoding UTF8
 
 # Execute in new PowerShell window for Workspace B
 Write-Host "Launching Workspace B setup in new window..." -ForegroundColor Yellow
-$ProcessB = Start-Process powershell -ArgumentList "-NoExit", "-Command", $BootstrapCommandB -PassThru
+$StartProcessArgs = @{
+    FilePath = 'powershell'
+    ArgumentList = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$TempScriptB`"")
+    PassThru = $true
+}
+$ProcessB = Start-Process @StartProcessArgs
 
 Write-Host "`n=============================================================" -ForegroundColor Cyan
 Write-Host "  INSTRUCTIONS FOR WORKSPACE B" -ForegroundColor Yellow
