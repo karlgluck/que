@@ -1362,14 +1362,8 @@ function New-QueWorkspace {
     $InitMode = 0  # 0 = blank, 1 = from other GitHub repo, 2 = from local, 3 = as part of existing GitHub repo
 
     if ($RepoExists) {
-        Write-Host "`nRepository exists on GitHub. Initialize workspace for use with Que?" -ForegroundColor Yellow
-        $Response = Read-Host "(Y/n)"
-        if ($Response -match '^n') {
-            Write-Host "Aborting workspace creation."
-            return
-        }
         $ShouldClone = $true
-        $InitMode = 3  # From GitHub repo that already exists
+        $InitMode = 3  # from GitHub repo that already exists
     } else {
         Write-Host "`nSelect initialization method:" -ForegroundColor Yellow
         $Options = @(
