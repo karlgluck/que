@@ -2,13 +2,14 @@
 
 QUE (Quick UE) is a single-file PowerShell solution for managing Unreal Engine 5.7 projects with Git, GitLFS, and SyncThing integration.
 
+This is the template repo for generating a new project. A copy of the que script in the generated repo is used to manage copies of that repo.
+
 ## Features
 
 - **Single-file architecture**: No modules, no dependencies on external files
-- **Workspace management**: Multiple clones sharing LFS storage
-- **Team collaboration**: SyncThing-based asset sharing
-- **Simple workflow**: Create, build, and manage UE projects with simple commands
-- **Self-contained**: All batteries included
+- **Fast, Cheap Clones**: Clones in a workspace share LFS depot
+- **Fast, Cheap Bootstrapping**: SyncThing shares raw assets and bypasses remote LFS servers
+- **Batteries Included**: Completely self-contained with built-in commands to build and package UE projects
 
 ## Getting Started
 
@@ -35,13 +36,6 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 
 4. Create your Unreal project inside the clone directory
 
-### Join an Existing Project
-
-Team members joining an existing QUE project should use the project-specific script:
-
-```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr ($queUrl = "https://raw.githubusercontent.com/USERNAME/REPONAME/main/que-REPONAME.ps1")).Content)
-```
 
 ## Workspace Structure
 
