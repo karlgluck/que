@@ -196,8 +196,6 @@ Once your workspace is set up, launch the management terminal using `que-{{REPO}
 - **open** - Generate project files, build, and launch UE editor
 - **build** - Build the editor target
 - **clean** - Delete intermediate files for full rebuild
-- **pull** - Pull latest changes from GitHub
-- **push** - Commit and push changes to GitHub
 - **package** - Create standalone builds
 - **info** - Display workspace information
 
@@ -1979,193 +1977,6 @@ function Clean-UnrealProject {
     }
 }
 
-function Pull-FromGitHub {
-    Write-Host "`nPulling from GitHub..." -ForegroundColor Cyan
-
-    Push-Location $CloneRoot
-
-    # Check current branch
-    $CurrentBranch = git rev-parse --abbrev-ref HEAD
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "Failed to get current branch"
-        return
-    }
-
-    if ($CurrentBranch -ne "main") {
-        Write-Error "Not on main branch (currently on $CurrentBranch). Switch to main first."
-        Pop-Location
-        return
-    }
-
-    # Stash changes
-    Write-Host "Stashing local changes..."
-    git stash push -m "QUE auto-stash $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-
-    # Pull from remote
-    Write-Host "Pulling from origin/main..."
-    git pull origin main
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "git pull failed with exit code $LASTEXITCODE"
-        Write-Host "Your stashed changes are safe. Run 'git stash list' to see them." -ForegroundColor Yellow
-        return
-    }
-
-    # Restore stashed changes
-    Write-Host "Restoring stashed changes..."
-    $StashList = git stash list
-    if ($StashList) {
-        git stash pop
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Stash pop had conflicts or failed."
-            Write-Host "`nTo resolve conflicts:" -ForegroundColor Yellow
-            Write-Host "  1. Fix conflicts in affected files" -ForegroundColor Yellow
-            Write-Host "  2. Run: git add <resolved-files>" -ForegroundColor Yellow
-            Write-Host "  3. Run: git stash drop" -ForegroundColor Yellow
-            Write-Host "`nYour stashed changes are safe and can be recovered with: git stash apply" -ForegroundColor Yellow
-            Pop-Location
-            return
-        }
-        Write-Host "Note: Changes remain in stash for manual recovery if needed. Use 'git stash drop' to remove." -ForegroundColor Yellow
-    }
-
-    Pop-Location
-    Write-Host "Pull completed!" -ForegroundColor Green
-}
-
-function Push-ToGitHub {
-    Write-Host "`nPushing to GitHub..." -ForegroundColor Cyan
-
-    Push-Location $CloneRoot
-
-    # Check current branch
-    $CurrentBranch = git rev-parse --abbrev-ref HEAD
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "Failed to get current branch"
-        return
-    }
-
-    if ($CurrentBranch -ne "main") {
-        Write-Error "Not on main branch (currently on $CurrentBranch). Switch to main first."
-        Pop-Location
-        return
-    }
-
-    # Create temporary branch
-    $TempBranch = "que-push-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-    Write-Host "Creating branch: $TempBranch"
-    git checkout -b $TempBranch
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "Failed to create temporary branch"
-        return
-    }
-
-    # Commit all changes
-    Write-Host "Committing all changes..."
-    git add -A
-    if ($LASTEXITCODE -ne 0) {
-        git checkout main
-        git branch -D $TempBranch
-        Pop-Location
-        Write-Error "git add failed"
-        return
-    }
-
-    $CommitMessage = Read-Host "Enter commit message"
-    if ([string]::IsNullOrWhiteSpace($CommitMessage)) {
-        $CommitMessage = "QUE auto-commit $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-    }
-    git commit -m $CommitMessage
-    if ($LASTEXITCODE -ne 0) {
-        git checkout main
-        git branch -D $TempBranch
-        Pop-Location
-        Write-Error "git commit failed (nothing to commit?)"
-        return
-    }
-
-    # Fetch and rebase on main
-    Write-Host "Fetching latest from origin..."
-    git fetch origin
-    if ($LASTEXITCODE -ne 0) {
-        git checkout main
-        git branch -D $TempBranch
-        Pop-Location
-        Write-Error "git fetch failed"
-        return
-    }
-
-    Write-Host "Rebasing on origin/main..."
-    git rebase origin/main
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Rebase failed. Aborting push. Resolve conflicts manually."
-        git rebase --abort
-        git checkout main
-        git branch -D $TempBranch
-        Pop-Location
-        return
-    }
-
-    # Push branch
-    Write-Host "Pushing branch to origin..."
-    git push -u origin $TempBranch
-    if ($LASTEXITCODE -ne 0) {
-        git checkout main
-        git branch -D $TempBranch
-        Pop-Location
-        Write-Error "git push failed"
-        return
-    }
-
-    # Switch to main
-    Write-Host "Switching to main..."
-    git checkout main
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "Failed to switch to main"
-        return
-    }
-
-    # Pull latest main
-    git pull origin main
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "Failed to pull latest main"
-        return
-    }
-
-    # Merge temp branch
-    Write-Host "Merging $TempBranch into main..."
-    git merge $TempBranch --no-ff -m "Merge $TempBranch"
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "Merge failed"
-        return
-    }
-
-    # Push main
-    Write-Host "Pushing main to origin..."
-    git push origin main
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        Write-Error "Failed to push main"
-        return
-    }
-
-    # Delete temp branch (locally and remotely)
-    Write-Host "Cleaning up temporary branch..."
-    git branch -d $TempBranch
-    git push origin --delete $TempBranch 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Failed to delete remote branch (may have been deleted already)"
-    }
-
-    Pop-Location
-    Write-Host "Push completed!" -ForegroundColor Green
-}
 
 function Package-UnrealProject {
     Write-Host "`nPackaging Unreal Engine project..." -ForegroundColor Cyan
@@ -2471,15 +2282,13 @@ function Invoke-QueMain {
             # Command loop
             while ($true) {
                 Write-Host "Commands: " -NoNewline -ForegroundColor White
-                Write-Host "open, build, clean, pull, push, package, info, exit" -ForegroundColor Gray
+                Write-Host "open, build, clean, package, info, exit" -ForegroundColor Gray
                 $Command = Read-Host "`nQUE>"
-        
+
                 switch ($Command.ToLower()) {
                     "open"    { Open-UnrealProject }
                     "build"   { Build-UnrealProject }
                     "clean"   { Clean-UnrealProject }
-                    "pull"    { Pull-FromGitHub }
-                    "push"    { Push-ToGitHub }
                     "package" { Package-UnrealProject }
                     "info"    { Show-WorkspaceInfo }
                     "exit"    { return }
