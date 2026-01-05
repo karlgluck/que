@@ -1316,7 +1316,7 @@ function New-QueWorkspace {
         [object]$UserInfo
     )
 
-    $WorkspaceRoot = Get-Location
+    $WorkspaceRoot = (Get-Location).Path
 
     Write-Host "`nCreating QUE workspace for $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
 
@@ -1342,7 +1342,7 @@ function New-QueWorkspace {
     try {
         $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
         $RepoUrl = "https://api.github.com/repos/$GitHubOwner/$GitHubRepo"
-        $Response = Invoke-WebRequest -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
         $RepoExists = $true
         Write-Host "`nRepository $GitHubOwner/$GitHubRepo already exists on GitHub" -ForegroundColor Green
     } catch {
@@ -1417,7 +1417,7 @@ function New-QueWorkspace {
                 "https://api.github.com/orgs/$GitHubOwner/repos"
             }
 
-            Invoke-WebRequest -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
+            Invoke-WebRequest -UseBasicParsing -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
             Write-Host "Repository created successfully" -ForegroundColor Green
         } catch {
             Write-Error "Failed to create repository: $($_.Exception.Message)"
@@ -2135,7 +2135,7 @@ function Invoke-QueMain {
             }
 
             Write-Host "`nQUE 5.7 - Quick Unreal Engine Project Manager" -ForegroundColor Cyan
-            $WorkspaceRoot = Get-Location
+            $WorkspaceRoot = (Get-Location).Path
 
             if ($IsBootstrapScript) {
                 ###QUE_CREATION_MODE_BEGIN###
