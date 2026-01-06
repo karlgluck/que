@@ -977,7 +977,7 @@ function Configure-SyncThingFolders {
     .SYNOPSIS
         Configures SyncThing folders for git-lfs and depot
     .DESCRIPTION
-        Adds sync/git-lfs/lfs folder with --ignore-delete flag
+        Adds sync/git-lfs folder with --ignore-delete flag
         Adds sync/depot folder (bidirectional)
     #>
     param(
@@ -998,7 +998,10 @@ function Configure-SyncThingFolders {
     $ApiKey = $SyncThingInfo.ApiKey
 
     # Add git-lfs folder with --ignore-delete flag
-    $LfsPath = Join-Path $WorkspaceRoot "sync\git-lfs\lfs"
+    # note: we intentionally wrap the "lfs" folder within a shared git-lfs so that the hidden meta-data
+    # folder used by syncthing gets created at `git-lfs\.stfolder` so it becomes a sibling instead of a child of `lfs`
+    # (sharing the lfs folder directly makes git unhappy, since git wants to believe it is managing the lfs folder)
+    $LfsPath = Join-Path $WorkspaceRoot "sync\git-lfs"
     $LfsFolderId = "$GitHubRepo-lfs"
     $LfsLabel = "$GitHubRepo Git LFS"
 
@@ -1044,10 +1047,11 @@ function Configure-SyncThingFolders {
 function Update-SyncThingDevices {
     <#
     .SYNOPSIS
-        Adds known devices to SyncThing configuration
+        Adds known devices to SyncThing configuration and shares folders
     .DESCRIPTION
         Queries existing devices and only adds new ones from $SyncThingDevices array
         Uses syncthing cli to check existing devices before adding
+        Automatically shares depot and git-lfs folders with new peers
     #>
     param(
         [string]$WorkspaceRoot,
@@ -1067,9 +1071,14 @@ function Update-SyncThingDevices {
         return
     }
 
+    $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     $GuiAddress = $SyncThingInfo.GuiAddress
     $ApiKey = $SyncThingInfo.ApiKey
+
+    # Construct folder IDs
+    $LfsFolderId = "$GitHubRepo-lfs"
+    $DepotFolderId = "$GitHubRepo-depot"
 
     # Get list of all known device IDs already configured
     $AllKnownDeviceIds = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>$null
@@ -1079,6 +1088,7 @@ function Update-SyncThingDevices {
         if ($DeviceId -and $AllKnownDeviceIds -notcontains $DeviceId) {
             Write-Host "Adding SyncThing peer: $DeviceId" -ForegroundColor Green
 
+            # Add the device
             $CliArgs = @(
                 "cli"
                 "--home=$SyncThingHome"
@@ -1091,6 +1101,38 @@ function Update-SyncThingDevices {
                 "--auto-accept-folders"
             )
             & $SyncThingExe @CliArgs
+
+            # Share git-lfs folder with the new peer
+            Write-Host "  Sharing git-lfs folder with peer" -ForegroundColor Cyan
+            $CliArgs = @(
+                "cli"
+                "--home=$SyncThingHome"
+                "--gui-address=$GuiAddress"
+                "--gui-apikey=$ApiKey"
+                "config"
+                "folders"
+                $LfsFolderId
+                "devices"
+                "add"
+                "--device-id=$DeviceId"
+            )
+            & $SyncThingExe @CliArgs 2>$null
+
+            # Share depot folder with the new peer
+            Write-Host "  Sharing depot folder with peer" -ForegroundColor Cyan
+            $CliArgs = @(
+                "cli"
+                "--home=$SyncThingHome"
+                "--gui-address=$GuiAddress"
+                "--gui-apikey=$ApiKey"
+                "config"
+                "folders"
+                $DepotFolderId
+                "devices"
+                "add"
+                "--device-id=$DeviceId"
+            )
+            & $SyncThingExe @CliArgs 2>$null
         } else {
             Write-Host "Device $DeviceId already configured, skipping" -ForegroundColor Gray
         }

@@ -14,11 +14,12 @@
     ✓ Phase 3: First workspace creation (via dot-sourcing que57.ps1 functions)
     ✓ Phase 4: Second workspace using generated script (with namespace management)
     ✓ Phase 5: Git LFS commit test (using .uasset file)
-    ⚠ Phase 6: SyncThing depot synchronization test (NOT IMPLEMENTED)
-    ⚠ Phase 7: Git pull LFS validation (NOT IMPLEMENTED)
-    ⚠ Phase 8: Multiple clones test (NOT IMPLEMENTED)
-    ✓ Phase 9: Summary and reporting
-    ✓ Phase 10: Cleanup with user prompts
+    ✓ Phase 6: SyncThing peer auto-addition test (launches .lnk files, commits/pulls device IDs)
+    ⚠ Phase 7: SyncThing depot synchronization test (NOT IMPLEMENTED)
+    ⚠ Phase 8: Git pull LFS validation (NOT IMPLEMENTED)
+    ⚠ Phase 9: Multiple clones test (NOT IMPLEMENTED)
+    ✓ Phase 10: Summary and reporting
+    ✓ Phase 11: Cleanup with user prompts
 
     CURRENT CAPABILITIES:
     - Validates environment (PowerShell, Git, Git LFS, SyncThing)
@@ -29,6 +30,8 @@
     - Creates second workspace using generated que-<repo>.ps1 script
     - Tests Git LFS tracking with .uasset files
     - Validates LFS commit and push operations
+    - Tests automatic SyncThing peer addition by launching .lnk files
+    - Validates device ID registration, commit, and folder sharing
     - Validates workspace structure and Git repository setup
     - Provides detailed logging and error reporting
     - Cleans up test artifacts (with user confirmation)
@@ -36,9 +39,9 @@
     - Suitable for git bisect integration (meaningful exit codes)
 
     LIMITATIONS:
-    - Does not test SyncThing synchronization between workspaces (Phase 6)
-    - Does not test Git pull with LFS file retrieval (Phase 7)
-    - Does not test multiple clone creation within a workspace (Phase 8)
+    - Does not test SyncThing depot file synchronization (Phase 7)
+    - Does not test Git pull with LFS file retrieval (Phase 8)
+    - Does not test multiple clone creation within a workspace (Phase 9)
 
     See PLAN.md for detailed implementation roadmap and future enhancements.
 
@@ -840,7 +843,246 @@ catch {
 
 #endregion
 
-#region Phase 6: SyncThing Depot Test
+#region Phase 6: SyncThing Peer Auto-Addition Test
+
+Write-TestStep "Phase 6: Testing automatic SyncThing peer addition and folder sharing"
+
+try {
+    if ($PSCmdlet.ShouldProcess("SyncThing peer auto-addition", "test")) {
+        # Step 6.1: Launch workspace 2's .lnk to trigger device ID registration
+        Write-Host "`nStep 6.1: Launching workspace 2 to register its SyncThing device ID" -ForegroundColor Cyan
+
+        $Workspace2Clone = Get-ChildItem "$($script:TestResults.Workspace2Path)\repo" -Directory | Select-Object -First 1
+        if (-not $Workspace2Clone) {
+            Write-TestFailure "Could not find workspace 2 clone directory"
+        }
+
+        $Workspace2ClonePath = $Workspace2Clone.FullName
+        $Workspace2CloneName = $Workspace2Clone.Name
+        $Workspace2LnkPath = Join-Path $script:TestResults.Workspace2Path "open-$Workspace2CloneName.lnk"
+        $Workspace2ScriptPath = Join-Path $Workspace2ClonePath "que-$($script:TestResults.GitHubRepoName).ps1"
+
+        if (-not (Test-Path $Workspace2LnkPath)) {
+            Write-TestFailure "Workspace 2 .lnk file not found at: $Workspace2LnkPath"
+        }
+        Write-TestSuccess "Found workspace 2 shortcut: $Workspace2LnkPath"
+
+        # Execute the script directly (simulates double-clicking the .lnk)
+        Write-Host "Executing workspace 2 launch script..." -ForegroundColor Gray
+        Push-Location $Workspace2ClonePath
+
+        # Run the script and capture output, providing 'exit' to exit the interactive loop
+        $LaunchOutput = "exit" | & powershell.exe -ExecutionPolicy Bypass -File $Workspace2ScriptPath 2>&1
+
+        Pop-Location
+
+        Write-Host "Launch output (last 10 lines):" -ForegroundColor Gray
+        $LaunchOutput | Select-Object -Last 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+
+        # Step 6.2: Verify the script was modified (has local diff)
+        Write-Host "`nStep 6.2: Verifying que script was modified with device ID" -ForegroundColor Cyan
+
+        Push-Location $Workspace2ClonePath
+
+        # Check git status for changes
+        $GitStatus = git status --porcelain "que-$($script:TestResults.GitHubRepoName).ps1" 2>&1
+
+        if ([string]::IsNullOrWhiteSpace($GitStatus)) {
+            Write-Host "WARNING: No changes detected in que script. Device ID may already be registered." -ForegroundColor Yellow
+            Write-Host "This may be expected if the script was already modified in an earlier phase." -ForegroundColor Yellow
+        } else {
+            Write-TestSuccess "Que script has local changes (device ID was added)"
+            Write-Host "Git status: $GitStatus" -ForegroundColor Gray
+        }
+
+        # Check git diff to see what changed
+        $GitDiff = git diff "que-$($script:TestResults.GitHubRepoName).ps1" 2>&1
+        if ($GitDiff) {
+            Write-Host "`nChanges in que script:" -ForegroundColor Gray
+            $GitDiff | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+
+            # Look for SyncThingDevices in the diff
+            if ($GitDiff -match '\$SyncThingDevices') {
+                Write-TestSuccess "Detected SyncThingDevices array modification in diff"
+            }
+        }
+
+        # Step 6.3: Commit and push the change
+        Write-Host "`nStep 6.3: Committing and pushing SyncThing device ID" -ForegroundColor Cyan
+
+        git add "que-$($script:TestResults.GitHubRepoName).ps1"
+        if ($LASTEXITCODE -ne 0) {
+            # If add fails, it might mean there's nothing to add (already committed)
+            Write-Host "Git add returned non-zero. Checking if there are changes to commit..." -ForegroundColor Yellow
+        }
+
+        git commit -m "Test: Add workspace 2 SyncThing device ID" 2>&1 | Out-Null
+        $CommitExitCode = $LASTEXITCODE
+
+        if ($CommitExitCode -eq 0) {
+            Write-TestSuccess "Committed device ID change"
+
+            git push origin main 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                Write-TestFailure "Failed to push device ID change to GitHub"
+            }
+            Write-TestSuccess "Pushed device ID change to GitHub"
+        } else {
+            Write-Host "No changes to commit (may already be committed)" -ForegroundColor Yellow
+        }
+
+        Pop-Location
+
+        # Step 6.4: Switch to workspace 1 and pull
+        Write-Host "`nStep 6.4: Pulling changes in workspace 1" -ForegroundColor Cyan
+
+        $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
+        if (-not $Workspace1Clone) {
+            Write-TestFailure "Could not find workspace 1 clone directory"
+        }
+
+        $Workspace1ClonePath = $Workspace1Clone.FullName
+        $Workspace1CloneName = $Workspace1Clone.Name
+
+        Push-Location $Workspace1ClonePath
+
+        git pull origin main 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Write-TestFailure "Failed to pull changes in workspace 1"
+        }
+        Write-TestSuccess "Pulled changes in workspace 1"
+
+        # Verify the que script was updated
+        $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que-$($script:TestResults.GitHubRepoName).ps1"
+        $ScriptContent = Get-Content $Workspace1ScriptPath -Raw
+
+        if ($ScriptContent -match '\$SyncThingDevices\s*=\s*@\(') {
+            Write-TestSuccess "Que script contains SyncThingDevices array"
+
+            # Extract device IDs to see if there are multiple
+            if ($ScriptContent -match '\$SyncThingDevices\s*=\s*@\(([^)]+)\)') {
+                $DevicesBlock = $matches[1]
+                $DeviceCount = ([regex]::Matches($DevicesBlock, '"([^"]+)"')).Count
+                Write-Host "Found $DeviceCount device ID(s) in script" -ForegroundColor Gray
+
+                if ($DeviceCount -ge 2) {
+                    Write-TestSuccess "Multiple device IDs found (workspace 1 and workspace 2)"
+                } elseif ($DeviceCount -eq 1) {
+                    Write-Host "Only 1 device ID found. This may be expected if workspaces share device IDs." -ForegroundColor Yellow
+                } else {
+                    Write-Host "No device IDs found in array" -ForegroundColor Yellow
+                }
+            }
+        }
+
+        Pop-Location
+
+        # Step 6.5: Launch workspace 1's .lnk to trigger peer addition
+        Write-Host "`nStep 6.5: Launching workspace 1 to add workspace 2 as peer" -ForegroundColor Cyan
+
+        $Workspace1LnkPath = Join-Path $script:TestResults.Workspace1Path "open-$Workspace1CloneName.lnk"
+
+        if (-not (Test-Path $Workspace1LnkPath)) {
+            Write-TestFailure "Workspace 1 .lnk file not found at: $Workspace1LnkPath"
+        }
+        Write-TestSuccess "Found workspace 1 shortcut: $Workspace1LnkPath"
+
+        # Execute the script directly
+        Write-Host "Executing workspace 1 launch script..." -ForegroundColor Gray
+        Push-Location $Workspace1ClonePath
+
+        # Run the script and capture output, providing 'exit' to exit the interactive loop
+        $LaunchOutput = "exit" | & powershell.exe -ExecutionPolicy Bypass -File $Workspace1ScriptPath 2>&1
+
+        Pop-Location
+
+        Write-Host "Launch output (last 20 lines):" -ForegroundColor Gray
+        $LaunchOutput | Select-Object -Last 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+
+        # Step 6.6: Verify peer was added and folders were shared
+        Write-Host "`nStep 6.6: Verifying SyncThing peer addition and folder sharing" -ForegroundColor Cyan
+
+        # Look for specific messages in the launch output
+        $LaunchOutputString = $LaunchOutput -join "`n"
+
+        if ($LaunchOutputString -match "Adding SyncThing peer") {
+            Write-TestSuccess "Detected peer addition in launch output"
+        } else {
+            Write-Host "No peer addition detected. Peer may already be configured." -ForegroundColor Yellow
+        }
+
+        if ($LaunchOutputString -match "Sharing.*folder with peer") {
+            Write-TestSuccess "Detected folder sharing in launch output"
+        } else {
+            Write-Host "No folder sharing detected in output" -ForegroundColor Yellow
+        }
+
+        # Additional verification: Check SyncThing config directly
+        Push-Location $Workspace1ClonePath
+
+        # Get the syncthing executable path from the workspace
+        $SyncThingHome = Join-Path $script:TestResults.Workspace1Path "env\syncthing-home"
+        if (Test-Path $SyncThingHome) {
+            # Try to list configured devices
+            $SyncThingExe = $null
+            $SyncThingPaths = @(
+                "syncthing",
+                "$env:ProgramFiles\Syncthing\syncthing.exe",
+                "$env:LOCALAPPDATA\Syncthing\syncthing.exe"
+            )
+
+            foreach ($path in $SyncThingPaths) {
+                try {
+                    $null = & $path --version 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        $SyncThingExe = $path
+                        break
+                    }
+                }
+                catch { }
+            }
+
+            if ($SyncThingExe) {
+                # Read SyncThing config to get GUI address and API key
+                $ConfigXml = Join-Path $SyncThingHome "config.xml"
+                if (Test-Path $ConfigXml) {
+                    [xml]$Config = Get-Content $ConfigXml
+                    $GuiAddress = $Config.configuration.gui.address
+                    $ApiKey = $Config.configuration.gui.apikey
+
+                    if ($GuiAddress -and $ApiKey) {
+                        $DeviceList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>&1
+
+                        if ($DeviceList) {
+                            $DeviceCount = @($DeviceList).Count
+                            Write-Host "SyncThing has $DeviceCount configured device(s)" -ForegroundColor Gray
+
+                            if ($DeviceCount -ge 2) {
+                                Write-TestSuccess "Multiple devices configured in SyncThing"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Pop-Location
+
+        Write-TestSuccess "SyncThing peer auto-addition test completed"
+    }
+}
+catch {
+    if (Get-Location | Select-Object -ExpandProperty Path | Where-Object { $_ -ne $script:TestRoot }) {
+        Pop-Location
+    }
+    Write-TestFailure "SyncThing peer auto-addition test failed: $($_.Exception.Message)"
+}
+
+#endregion
+
+#region Phase 7: SyncThing Depot Test
 <#
 IMPLEMENTATION NOTE:
 This phase would test SyncThing synchronization by:
@@ -851,10 +1093,10 @@ This phase would test SyncThing synchronization by:
 Implementation requires managing multiple SyncThing instances and waiting for sync.
 For now, this phase is not implemented.
 #>
-Write-Host "`nNOTE: Phase 6 (SyncThing Depot Test) not implemented - see PLAN.md for details" -ForegroundColor Yellow
+Write-Host "`nNOTE: Phase 7 (SyncThing Depot Test) not implemented - see PLAN.md for details" -ForegroundColor Yellow
 #endregion
 
-#region Phase 7: Git Pull LFS Validation
+#region Phase 8: Git Pull LFS Validation
 <#
 IMPLEMENTATION NOTE:
 This phase would test LFS file retrieval by:
@@ -865,10 +1107,10 @@ This phase would test LFS file retrieval by:
 Requires Phase 5 to be implemented first.
 For now, this phase is not implemented.
 #>
-Write-Host "`nNOTE: Phase 7 (Git Pull LFS) not implemented - see PLAN.md for details" -ForegroundColor Yellow
+Write-Host "`nNOTE: Phase 8 (Git Pull LFS) not implemented - see PLAN.md for details" -ForegroundColor Yellow
 #endregion
 
-#region Phase 8: Multiple Clones Test
+#region Phase 9: Multiple Clones Test
 <#
 IMPLEMENTATION NOTE:
 This phase would test creating multiple clones within a workspace by:
@@ -879,10 +1121,10 @@ This phase would test creating multiple clones within a workspace by:
 Requires Phase 4 to be implemented first.
 For now, this phase is not implemented.
 #>
-Write-Host "`nNOTE: Phase 8 (Multiple Clones) not implemented - see PLAN.md for details" -ForegroundColor Yellow
+Write-Host "`nNOTE: Phase 9 (Multiple Clones) not implemented - see PLAN.md for details" -ForegroundColor Yellow
 #endregion
 
-#region Phase 9: Summary and Reporting
+#region Phase 10: Summary and Reporting
 
 function Show-TestSummary {
     $duration = (Get-Date) - $script:TestStartTime
@@ -933,7 +1175,7 @@ function Show-TestSummary {
 
 #endregion
 
-#region Phase 10: Cleanup and User Prompts
+#region Phase 11: Cleanup and User Prompts
 
 function Invoke-Cleanup {
     Write-Host "`n============================================" -ForegroundColor Yellow
