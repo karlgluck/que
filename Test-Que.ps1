@@ -15,7 +15,7 @@
     ✓ Phase 4: Second workspace using generated script (with namespace management)
     ✓ Phase 5: Git LFS commit test (using .uasset file)
     ✓ Phase 6: SyncThing peer auto-addition test (launches .lnk files, commits/pulls device IDs)
-    ⚠ Phase 7: SyncThing depot synchronization test (NOT IMPLEMENTED)
+    ✓ Phase 7: SyncThing depot synchronization test (creates file, waits for sync, validates contents)
     ⚠ Phase 8: Git pull LFS validation (NOT IMPLEMENTED)
     ⚠ Phase 9: Multiple clones test (NOT IMPLEMENTED)
     ✓ Phase 10: Summary and reporting
@@ -32,6 +32,8 @@
     - Validates LFS commit and push operations
     - Tests automatic SyncThing peer addition by launching .lnk files
     - Validates device ID registration, commit, and folder sharing
+    - Tests SyncThing depot file synchronization between workspaces
+    - Validates synced file contents and metadata
     - Validates workspace structure and Git repository setup
     - Provides detailed logging and error reporting
     - Cleans up test artifacts (with user confirmation)
@@ -39,7 +41,6 @@
     - Suitable for git bisect integration (meaningful exit codes)
 
     LIMITATIONS:
-    - Does not test SyncThing depot file synchronization (Phase 7)
     - Does not test Git pull with LFS file retrieval (Phase 8)
     - Does not test multiple clone creation within a workspace (Phase 9)
 
@@ -1083,17 +1084,108 @@ catch {
 #endregion
 
 #region Phase 7: SyncThing Depot Test
-<#
-IMPLEMENTATION NOTE:
-This phase would test SyncThing synchronization by:
-1. Creating a file in workspace 1's depot folder
-2. Waiting for it to sync to workspace 2
-3. Validating file contents match
 
-Implementation requires managing multiple SyncThing instances and waiting for sync.
-For now, this phase is not implemented.
-#>
-Write-Host "`nNOTE: Phase 7 (SyncThing Depot Test) not implemented - see PLAN.md for details" -ForegroundColor Yellow
+Write-TestStep "Phase 7: Testing SyncThing depot synchronization"
+
+try {
+    if ($PSCmdlet.ShouldProcess("SyncThing depot sync", "test")) {
+        # Step 7.1: Create File in Second Workspace Depot
+        Write-Host "`nStep 7.1: Creating test file in workspace 2 depot" -ForegroundColor Cyan
+
+        if (-not $script:TestResults.Workspace2Path) {
+            Write-TestFailure "Second workspace not available for depot sync test"
+        }
+
+        # Locate depot folder in second workspace
+        $Workspace2DepotPath = Join-Path $script:TestResults.Workspace2Path ".que\depot"
+        if (-not (Test-Path $Workspace2DepotPath)) {
+            Write-TestFailure "Depot folder not found in workspace 2: $Workspace2DepotPath"
+        }
+        Write-TestSuccess "Found workspace 2 depot: $Workspace2DepotPath"
+
+        # Create test file with timestamp
+        $TestFileName = "test-syncthing-file.txt"
+        $TestFileContent = "SyncThing test created at $(Get-Date -Format 'o')`nThis file validates depot synchronization between workspaces."
+        $SourceFilePath = Join-Path $Workspace2DepotPath $TestFileName
+
+        Set-Content -Path $SourceFilePath -Value $TestFileContent -Encoding UTF8
+        Write-TestSuccess "Created test file: $SourceFilePath"
+        Write-Host "File content: $TestFileContent" -ForegroundColor Gray
+
+        # Step 7.2: Wait for Sync to First Workspace
+        Write-Host "`nStep 7.2: Waiting for file to sync to workspace 1" -ForegroundColor Cyan
+
+        if (-not $script:TestResults.Workspace1Path) {
+            Write-TestFailure "First workspace not available for depot sync test"
+        }
+
+        $Workspace1DepotPath = Join-Path $script:TestResults.Workspace1Path ".que\depot"
+        if (-not (Test-Path $Workspace1DepotPath)) {
+            Write-TestFailure "Depot folder not found in workspace 1: $Workspace1DepotPath"
+        }
+
+        $TargetFilePath = Join-Path $Workspace1DepotPath $TestFileName
+        Write-Host "Target path: $TargetFilePath" -ForegroundColor Gray
+
+        # Use Wait-ForFile with configured timeout
+        $Synced = Wait-ForFile -Path $TargetFilePath -TimeoutSeconds $Timeout -PollIntervalSeconds 2
+
+        # If timeout occurs, offer to wait longer
+        while (-not $Synced) {
+            Write-Host "`nFile did not sync within ${Timeout}s timeout" -ForegroundColor Yellow
+
+            # Display diagnostic information
+            $SyncCount = Get-SyncThingProcessCount
+            Write-Host "SyncThing processes running: $SyncCount" -ForegroundColor Yellow
+
+            if ($SyncCount -lt 2) {
+                Write-Host "WARNING: Expected 2 SyncThing processes for sync to work" -ForegroundColor Yellow
+            }
+
+            # Ask user if they want to continue waiting
+            if (Wait-ForUserConfirmation -Message "SyncThing file sync timeout.") {
+                Write-Host "Waiting another ${Timeout}s..." -ForegroundColor Cyan
+                $Synced = Wait-ForFile -Path $TargetFilePath -TimeoutSeconds $Timeout -PollIntervalSeconds 2
+            }
+            else {
+                Write-TestFailure "SyncThing depot sync failed: File did not appear in workspace 1 after timeout"
+            }
+        }
+
+        # Step 7.3: Validate Sync Contents
+        Write-Host "`nStep 7.3: Validating synced file contents" -ForegroundColor Cyan
+
+        # Read both files
+        $SourceContent = Get-Content -Path $SourceFilePath -Raw -Encoding UTF8
+        $TargetContent = Get-Content -Path $TargetFilePath -Raw -Encoding UTF8
+
+        # Compare contents
+        if ($SourceContent -ne $TargetContent) {
+            Write-Host "Source content: $SourceContent" -ForegroundColor Red
+            Write-Host "Target content: $TargetContent" -ForegroundColor Red
+            Write-TestFailure "File synced but contents don't match"
+        }
+
+        Write-TestSuccess "File contents match between workspaces"
+
+        # Verify file metadata
+        $SourceFile = Get-Item $SourceFilePath
+        $TargetFile = Get-Item $TargetFilePath
+
+        Write-Host "Source file size: $($SourceFile.Length) bytes" -ForegroundColor Gray
+        Write-Host "Target file size: $($TargetFile.Length) bytes" -ForegroundColor Gray
+
+        if ($SourceFile.Length -ne $TargetFile.Length) {
+            Write-Host "WARNING: File sizes differ" -ForegroundColor Yellow
+        }
+
+        Write-TestSuccess "SyncThing depot synchronization test completed successfully"
+    }
+}
+catch {
+    Write-TestFailure "SyncThing depot sync test failed: $($_.Exception.Message)"
+}
+
 #endregion
 
 #region Phase 8: Git Pull LFS Validation
