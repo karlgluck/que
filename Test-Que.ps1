@@ -16,7 +16,7 @@
     ✓ Phase 5: Git LFS commit test (using .uasset file)
     ✓ Phase 6: SyncThing peer auto-addition test (launches .lnk files, commits/pulls device IDs)
     ✓ Phase 7: SyncThing depot synchronization test (creates file, waits for sync, validates contents)
-    ⚠ Phase 8: Git pull LFS validation (NOT IMPLEMENTED)
+    ✓ Phase 8: Git pull LFS validation (waits for LFS cache sync, pulls, validates checkout)
     ⚠ Phase 9: Multiple clones test (NOT IMPLEMENTED)
     ✓ Phase 10: Summary and reporting
     ✓ Phase 11: Cleanup with user prompts
@@ -34,6 +34,8 @@
     - Validates device ID registration, commit, and folder sharing
     - Tests SyncThing depot file synchronization between workspaces
     - Validates synced file contents and metadata
+    - Tests SyncThing LFS cache synchronization between workspaces
+    - Validates Git LFS pull with proper file checkout (not pointers)
     - Validates workspace structure and Git repository setup
     - Provides detailed logging and error reporting
     - Cleans up test artifacts (with user confirmation)
@@ -41,7 +43,6 @@
     - Suitable for git bisect integration (meaningful exit codes)
 
     LIMITATIONS:
-    - Does not test Git pull with LFS file retrieval (Phase 8)
     - Does not test multiple clone creation within a workspace (Phase 9)
 
     See PLAN.md for detailed implementation roadmap and future enhancements.
@@ -1097,7 +1098,7 @@ try {
         }
 
         # Locate depot folder in second workspace
-        $Workspace2DepotPath = Join-Path $script:TestResults.Workspace2Path ".que\depot"
+        $Workspace2DepotPath = Join-Path $script:TestResults.Workspace2Path "sync\depot"
         if (-not (Test-Path $Workspace2DepotPath)) {
             Write-TestFailure "Depot folder not found in workspace 2: $Workspace2DepotPath"
         }
@@ -1119,7 +1120,7 @@ try {
             Write-TestFailure "First workspace not available for depot sync test"
         }
 
-        $Workspace1DepotPath = Join-Path $script:TestResults.Workspace1Path ".que\depot"
+        $Workspace1DepotPath = Join-Path $script:TestResults.Workspace1Path "sync\depot"
         if (-not (Test-Path $Workspace1DepotPath)) {
             Write-TestFailure "Depot folder not found in workspace 1: $Workspace1DepotPath"
         }
@@ -1189,17 +1190,185 @@ catch {
 #endregion
 
 #region Phase 8: Git Pull LFS Validation
-<#
-IMPLEMENTATION NOTE:
-This phase would test LFS file retrieval by:
-1. Pulling in workspace 2
-2. Verifying LFS files are downloaded (not just pointers)
-3. Validating file sizes and content
 
-Requires Phase 5 to be implemented first.
-For now, this phase is not implemented.
-#>
-Write-Host "`nNOTE: Phase 8 (Git Pull LFS) not implemented - see PLAN.md for details" -ForegroundColor Yellow
+Write-TestStep "Phase 8: Testing Git LFS pull with SyncThing cache synchronization"
+
+try {
+    if ($PSCmdlet.ShouldProcess("Git LFS pull", "test")) {
+        # Step 8.1: Identify the LFS file and its cache object
+        Write-Host "`nStep 8.1: Identifying LFS file from Phase 5" -ForegroundColor Cyan
+
+        if (-not $script:TestResults.Workspace2Path) {
+            Write-TestFailure "Second workspace not available for LFS pull test"
+        }
+
+        $Workspace2Clone = Get-ChildItem "$($script:TestResults.Workspace2Path)\repo" -Directory | Select-Object -First 1
+        if (-not $Workspace2Clone) {
+            Write-TestFailure "Could not find workspace 2 clone directory"
+        }
+
+        $Workspace2ClonePath = $Workspace2Clone.FullName
+        $LfsFileName = "TestAsset.uasset"
+        $LfsFilePath = Join-Path $Workspace2ClonePath $LfsFileName
+
+        if (-not (Test-Path $LfsFilePath)) {
+            Write-TestFailure "LFS test file not found at: $LfsFilePath (Phase 5 may have failed)"
+        }
+        Write-TestSuccess "Found LFS test file: $LfsFilePath"
+
+        # Get the LFS object hash for this file
+        Push-Location $Workspace2ClonePath
+        $LfsLsOutput = git lfs ls-files -n 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Write-TestFailure "Failed to list LFS files in workspace 2"
+        }
+
+        # Extract the OID (object ID) for the test file
+        $LfsInfo = git lfs ls-files -l | Where-Object { $_ -match $LfsFileName }
+        if (-not $LfsInfo) {
+            Pop-Location
+            Write-TestFailure "Test file not tracked by LFS: $LfsFileName"
+        }
+
+        # Parse the OID from the ls-files output (format: "OID - filename")
+        if ($LfsInfo -match '([a-f0-9]{64})') {
+            $LfsOid = $matches[1]
+            Write-TestSuccess "LFS object ID: $LfsOid"
+        }
+        else {
+            Pop-Location
+            Write-TestFailure "Could not parse LFS object ID from: $LfsInfo"
+        }
+
+        Pop-Location
+
+        # Step 8.2: Wait for LFS cache object to sync via SyncThing
+        Write-Host "`nStep 8.2: Waiting for LFS cache to sync from workspace 2 to workspace 1" -ForegroundColor Cyan
+
+        if (-not $script:TestResults.Workspace1Path) {
+            Write-TestFailure "First workspace not available for LFS pull test"
+        }
+
+        # LFS cache is in .que/lfs-cache with structure: lfs/objects/XX/YY/XXYY...
+        $LfsOidPrefix = $LfsOid.Substring(0, 2)
+        $LfsOidSuffix = $LfsOid.Substring(2, 2)
+        $LfsCacheRelativePath = "lfs\objects\$LfsOidPrefix\$LfsOidSuffix\$LfsOid"
+
+        $Workspace1LfsCachePath = Join-Path $script:TestResults.Workspace1Path ".que\lfs-cache\$LfsCacheRelativePath"
+        Write-Host "Expected LFS cache path: $Workspace1LfsCachePath" -ForegroundColor Gray
+
+        # Wait for the LFS object to sync
+        $LfsSynced = Wait-ForFile -Path $Workspace1LfsCachePath -TimeoutSeconds $Timeout -PollIntervalSeconds 2
+
+        # If timeout occurs, offer to wait longer
+        while (-not $LfsSynced) {
+            Write-Host "`nLFS cache file did not sync within ${Timeout}s timeout" -ForegroundColor Yellow
+
+            # Display diagnostic information
+            $SyncCount = Get-SyncThingProcessCount
+            Write-Host "SyncThing processes running: $SyncCount" -ForegroundColor Yellow
+
+            if ($SyncCount -lt 2) {
+                Write-Host "WARNING: Expected 2 SyncThing processes for sync to work" -ForegroundColor Yellow
+            }
+
+            # Check if the source file exists in workspace 2
+            $Workspace2LfsCachePath = Join-Path $script:TestResults.Workspace2Path ".que\lfs-cache\$LfsCacheRelativePath"
+            if (Test-Path $Workspace2LfsCachePath) {
+                Write-Host "Source LFS cache file exists in workspace 2: $Workspace2LfsCachePath" -ForegroundColor Gray
+            }
+            else {
+                Write-Host "WARNING: Source LFS cache file not found in workspace 2: $Workspace2LfsCachePath" -ForegroundColor Yellow
+            }
+
+            # Ask user if they want to continue waiting
+            if (Wait-ForUserConfirmation -Message "LFS cache sync timeout.") {
+                Write-Host "Waiting another ${Timeout}s..." -ForegroundColor Cyan
+                $LfsSynced = Wait-ForFile -Path $Workspace1LfsCachePath -TimeoutSeconds $Timeout -PollIntervalSeconds 2
+            }
+            else {
+                Write-TestFailure "LFS cache sync failed: File did not appear in workspace 1 LFS cache after timeout"
+            }
+        }
+
+        Write-TestSuccess "LFS cache object synced to workspace 1 via SyncThing"
+
+        # Step 8.3: Pull in workspace 1 and verify LFS file checkout
+        Write-Host "`nStep 8.3: Running git pull in workspace 1" -ForegroundColor Cyan
+
+        $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
+        if (-not $Workspace1Clone) {
+            Write-TestFailure "Could not find workspace 1 clone directory"
+        }
+
+        $Workspace1ClonePath = $Workspace1Clone.FullName
+        Push-Location $Workspace1ClonePath
+
+        # Run git pull
+        $PullOutput = git pull origin main 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Write-Host "Git pull output:" -ForegroundColor Red
+            $PullOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+            Write-TestFailure "Git pull failed in workspace 1"
+        }
+        Write-TestSuccess "Git pull completed successfully"
+        Write-Host "Pull output:" -ForegroundColor Gray
+        $PullOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+
+        # Step 8.4: Verify LFS file is checked out (not a pointer)
+        Write-Host "`nStep 8.4: Verifying LFS file is properly checked out" -ForegroundColor Cyan
+
+        $Workspace1LfsFilePath = Join-Path $Workspace1ClonePath $LfsFileName
+
+        if (-not (Test-Path $Workspace1LfsFilePath)) {
+            Pop-Location
+            Write-TestFailure "LFS file not found after pull: $Workspace1LfsFilePath"
+        }
+        Write-TestSuccess "LFS file exists in workspace 1: $Workspace1LfsFilePath"
+
+        # Read the file content to verify it's not a pointer
+        $FileContent = Get-Content -Path $Workspace1LfsFilePath -Raw -ErrorAction Stop
+
+        # Check if it's an LFS pointer (pointers start with "version https://git-lfs.github.com")
+        if ($FileContent -match "^version https://git-lfs\.github\.com") {
+            Pop-Location
+            Write-Host "File content (pointer detected):" -ForegroundColor Red
+            Write-Host $FileContent -ForegroundColor Red
+            Write-TestFailure "LFS file is still a pointer, not properly downloaded"
+        }
+
+        Write-TestSuccess "LFS file is properly checked out (not a pointer)"
+
+        # Verify content matches between workspaces
+        $Workspace2FileContent = Get-Content -Path $LfsFilePath -Raw -ErrorAction Stop
+        if ($FileContent -ne $Workspace2FileContent) {
+            Pop-Location
+            Write-Host "Workspace 1 content: $FileContent" -ForegroundColor Red
+            Write-Host "Workspace 2 content: $Workspace2FileContent" -ForegroundColor Red
+            Write-TestFailure "LFS file content doesn't match between workspaces"
+        }
+
+        Write-TestSuccess "LFS file content matches between workspaces"
+
+        # Display file info
+        $FileInfo = Get-Item $Workspace1LfsFilePath
+        Write-Host "LFS file size: $($FileInfo.Length) bytes" -ForegroundColor Gray
+        Write-Host "LFS file content: $($FileContent.Substring(0, [Math]::Min(100, $FileContent.Length)))..." -ForegroundColor Gray
+
+        Pop-Location
+
+        Write-TestSuccess "Git LFS pull with SyncThing cache synchronization test completed successfully"
+    }
+}
+catch {
+    if (Get-Location | Select-Object -ExpandProperty Path | Where-Object { $_ -ne $script:TestRoot }) {
+        Pop-Location
+    }
+    Write-TestFailure "Git LFS pull test failed: $($_.Exception.Message)"
+}
+
 #endregion
 
 #region Phase 9: Multiple Clones Test
