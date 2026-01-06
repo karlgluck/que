@@ -17,7 +17,7 @@
     ✓ Phase 6: SyncThing peer auto-addition test (launches .lnk files, commits/pulls device IDs)
     ✓ Phase 7: SyncThing depot synchronization test (creates file, waits for sync, validates contents)
     ✓ Phase 8: Git pull LFS validation (waits for LFS cache sync, pulls, validates checkout)
-    ⚠ Phase 9: Multiple clones test (NOT IMPLEMENTED)
+    ✓ Phase 9: Multiple clones test (creates second clone in workspace 1, validates structure)
     ✓ Phase 10: Summary and reporting
     ✓ Phase 11: Cleanup with user prompts
 
@@ -36,14 +36,13 @@
     - Validates synced file contents and metadata
     - Tests SyncThing LFS cache synchronization between workspaces
     - Validates Git LFS pull with proper file checkout (not pointers)
+    - Tests multiple clone creation within a workspace
+    - Validates clone structure and git repository configuration
     - Validates workspace structure and Git repository setup
     - Provides detailed logging and error reporting
     - Cleans up test artifacts (with user confirmation)
     - Supports -WhatIf for safe dry-runs
     - Suitable for git bisect integration (meaningful exit codes)
-
-    LIMITATIONS:
-    - Does not test multiple clone creation within a workspace (Phase 9)
 
     See PLAN.md for detailed implementation roadmap and future enhancements.
 
@@ -1250,12 +1249,12 @@ try {
             Write-TestFailure "First workspace not available for LFS pull test"
         }
 
-        # LFS cache is in .que/lfs-cache with structure: lfs/objects/XX/YY/XXYY...
+        # LFS cache is in sync/git-lfs with structure: lfs/objects/XX/YY/XXYY...
         $LfsOidPrefix = $LfsOid.Substring(0, 2)
         $LfsOidSuffix = $LfsOid.Substring(2, 2)
         $LfsCacheRelativePath = "lfs\objects\$LfsOidPrefix\$LfsOidSuffix\$LfsOid"
 
-        $Workspace1LfsCachePath = Join-Path $script:TestResults.Workspace1Path ".que\lfs-cache\$LfsCacheRelativePath"
+        $Workspace1LfsCachePath = Join-Path $script:TestResults.Workspace1Path "sync\git-lfs\$LfsCacheRelativePath"
         Write-Host "Expected LFS cache path: $Workspace1LfsCachePath" -ForegroundColor Gray
 
         # Wait for the LFS object to sync
@@ -1274,7 +1273,7 @@ try {
             }
 
             # Check if the source file exists in workspace 2
-            $Workspace2LfsCachePath = Join-Path $script:TestResults.Workspace2Path ".que\lfs-cache\$LfsCacheRelativePath"
+            $Workspace2LfsCachePath = Join-Path $script:TestResults.Workspace2Path "sync\git-lfs\$LfsCacheRelativePath"
             if (Test-Path $Workspace2LfsCachePath) {
                 Write-Host "Source LFS cache file exists in workspace 2: $Workspace2LfsCachePath" -ForegroundColor Gray
             }
@@ -1372,17 +1371,159 @@ catch {
 #endregion
 
 #region Phase 9: Multiple Clones Test
-<#
-IMPLEMENTATION NOTE:
-This phase would test creating multiple clones within a workspace by:
-1. Running the one-liner from within an existing workspace
-2. Verifying the clone naming scheme (YYYY-MM-DD-A, -B, etc.)
-3. Validating directory structure
 
-Requires Phase 4 to be implemented first.
-For now, this phase is not implemented.
-#>
-Write-Host "`nNOTE: Phase 9 (Multiple Clones) not implemented - see PLAN.md for details" -ForegroundColor Yellow
+Write-TestStep "Phase 9: Testing multiple clones within a workspace"
+
+try {
+    if ($PSCmdlet.ShouldProcess("second clone in workspace 1", "create")) {
+        # Step 9.1: Load the generated script and create second clone
+        Write-Host "`nStep 9.1: Creating second clone in first workspace" -ForegroundColor Cyan
+
+        if (-not $script:TestResults.Workspace1Path) {
+            Write-TestFailure "First workspace not available for multiple clones test"
+        }
+
+        # Find the generated script in the first workspace
+        $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
+        if (-not $Workspace1Clone) {
+            Write-TestFailure "Could not find first workspace clone directory"
+        }
+
+        $GeneratedScript = Join-Path $Workspace1Clone.FullName "que-$($script:TestResults.GitHubRepoName).ps1"
+        if (-not (Test-Path $GeneratedScript)) {
+            Write-TestFailure "Generated script not found at: $GeneratedScript"
+        }
+        Write-TestSuccess "Found generated script: $GeneratedScript"
+
+        # Count existing clones before creating new one
+        $ExistingClones = @(Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory)
+        $ExistingCloneCount = $ExistingClones.Count
+        Write-Host "Existing clones in workspace 1: $ExistingCloneCount" -ForegroundColor Gray
+
+        # Remove any previously loaded functions to avoid conflicts
+        $FunctionsToRemove = @(
+            'Find-QueWorkspace', 'Get-AvailableSyncThingPort', 'Get-SecureGitHubPAT',
+            'Set-SecureGitHubPAT', 'Store-GitCredentials', 'Test-GitHubPAT',
+            'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
+            'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
+            'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable',
+            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Initialize-SyncThing',
+            'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
+            'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
+            'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain'
+        )
+
+        foreach ($FuncName in $FunctionsToRemove) {
+            if (Get-Command $FuncName -ErrorAction SilentlyContinue) {
+                Remove-Item "Function:\$FuncName" -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Host "Cleared function namespace" -ForegroundColor Gray
+
+        # Dot-source the generated script to load its functions
+        Write-Host "Loading generated script functions..." -ForegroundColor Cyan
+        . $GeneratedScript
+
+        # Load the generated script content into $queScript variable
+        $script:queScript = Get-Content -Path $GeneratedScript -Raw -Encoding UTF8
+
+        # Validate GitHub token
+        $TestUser = Test-GitHubPAT -PlainPAT $GitHubToken
+        if (-not $TestUser) {
+            Write-TestFailure "Failed to validate GitHub token for clone creation"
+        }
+
+        # Create the second clone using New-QueClone
+        Write-Host "Creating second clone in workspace 1..." -ForegroundColor Cyan
+        New-QueClone -WorkspaceRoot $script:TestResults.Workspace1Path `
+                     -IsFirstClone $false `
+                     -ShouldClone $true `
+                     -UserInfo $TestUser `
+                     -PlainPAT $GitHubToken
+
+        # Step 9.2: Validate Clone Structure
+        Write-Host "`nStep 9.2: Validating clone structure" -ForegroundColor Cyan
+
+        # Count clones after creation
+        $AllClones = @(Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory)
+        $NewCloneCount = $AllClones.Count
+
+        if ($NewCloneCount -le $ExistingCloneCount) {
+            Write-TestFailure "Second clone was not created. Expected $($ExistingCloneCount + 1) clones, found $NewCloneCount"
+        }
+        Write-TestSuccess "Clone count increased from $ExistingCloneCount to $NewCloneCount"
+
+        if ($NewCloneCount -ne 2) {
+            Write-Host "WARNING: Expected exactly 2 clones in workspace 1, found $NewCloneCount" -ForegroundColor Yellow
+        }
+
+        # List all clones
+        Write-Host "Clones in workspace 1:" -ForegroundColor Gray
+        foreach ($clone in $AllClones) {
+            Write-Host "  - $($clone.Name)" -ForegroundColor Gray
+        }
+
+        # Verify each clone is a valid git repository
+        foreach ($clone in $AllClones) {
+            $ClonePath = $clone.FullName
+            $GitDir = Join-Path $ClonePath ".git"
+
+            if (-not (Test-Path $GitDir)) {
+                Write-TestFailure "Clone is not a valid git repository: $ClonePath"
+            }
+
+            # Verify remote URL
+            Push-Location $ClonePath
+            $RemoteUrl = git remote get-url origin 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                Write-TestFailure "Git remote not configured in clone: $ClonePath"
+            }
+            Write-Host "  Clone $($clone.Name) remote: $RemoteUrl" -ForegroundColor Gray
+
+            # Verify it's pointing to the correct repository
+            if ($RemoteUrl -notmatch $script:TestResults.GitHubRepoName) {
+                Pop-Location
+                Write-TestFailure "Clone has incorrect remote URL: $RemoteUrl (expected: $($script:TestResults.GitHubRepoName))"
+            }
+
+            Pop-Location
+        }
+
+        Write-TestSuccess "All clones are valid git repositories with correct remotes"
+
+        # Verify .lnk shortcuts exist for all clones
+        foreach ($clone in $AllClones) {
+            $LnkPath = Join-Path $script:TestResults.Workspace1Path "open-$($clone.Name).lnk"
+            if (-not (Test-Path $LnkPath)) {
+                Write-Host "WARNING: Shortcut not found for clone $($clone.Name): $LnkPath" -ForegroundColor Yellow
+            } else {
+                Write-Host "  Found shortcut: open-$($clone.Name).lnk" -ForegroundColor Gray
+            }
+        }
+
+        # Verify directory structure matches expected pattern
+        Write-Host "`nExpected directory structure:" -ForegroundColor Gray
+        Write-Host "  $($script:TestResults.Workspace1Path)/" -ForegroundColor Gray
+        Write-Host "    +-- repo/" -ForegroundColor Gray
+        Write-Host "        +-- $($AllClones[0].Name)/" -ForegroundColor Gray
+        if ($AllClones.Count -ge 2) {
+            Write-Host "        +-- $($AllClones[1].Name)/" -ForegroundColor Gray
+        }
+        Write-Host "    +-- sync/" -ForegroundColor Gray
+        Write-Host "    +-- env/" -ForegroundColor Gray
+        Write-Host "    +-- .que/" -ForegroundColor Gray
+
+        Write-TestSuccess "Multiple clones test completed successfully"
+    }
+}
+catch {
+    if (Get-Location | Select-Object -ExpandProperty Path | Where-Object { $_ -ne $script:TestRoot }) {
+        Pop-Location
+    }
+    Write-TestFailure "Multiple clones test failed: $($_.Exception.Message)"
+}
+
 #endregion
 
 #region Phase 10: Summary and Reporting
