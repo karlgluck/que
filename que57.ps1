@@ -165,7 +165,7 @@ To set up your development environment and join this project:
 3. Run this command in PowerShell:
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -UseBasicParsing -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
 ```
 
 3. Follow the prompts to:
@@ -1448,11 +1448,11 @@ function New-QueWorkspace {
 
         # Get content from another repo
         Push-Location $CloneRoot
-        git remote add source $CloneFromSource
-        git fetch source
-        git merge source/main --allow-unrelated-histories -m "Import from $CloneFromSource"
-        git push origin main
-        git remote remove source
+        git remote add source $CloneFromSource 2>&1 | Out-Host
+        git fetch source 2>&1 | Out-Host
+        git merge source/main --allow-unrelated-histories -m "Import from $CloneFromSource" 2>&1 | Out-Host
+        git push origin main 2>&1 | Out-Host
+        git remote remove source 2>&1 | Out-Host
         Pop-Location
 
         Write-Host "Imported from source repository into $CloneRoot" -ForegroundColor Green
@@ -1466,15 +1466,15 @@ function New-QueWorkspace {
 
         # Commit and push
         Push-Location $CloneRoot
-        git add -A
-        git commit -m "Import from local repository"
-        git push origin main
+        git add -A 2>&1 | Out-Host
+        git commit -m "Import from local repository" 2>&1 | Out-Host
+        git push origin main 2>&1 | Out-Host
         Pop-Location
 
         Write-Host "Imported from local repository into $CloneRoot" -ForegroundColor Green
     } elseif ($InitMode -eq 3) {
         Push-Location $CloneRoot
-        git pull
+        git pull 2>&1 | Out-Host
         Pop-Location
 
         Write-Host "Pulled latest from repository into $CloneRoot" -ForegroundColor Green
@@ -1546,7 +1546,7 @@ function New-QueClone {
         $env:GIT_LFS_SKIP_SMUDGE = '1'
 
         Push-Location $CloneRoot
-        git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" .
+        git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git clone failed with exit code $LASTEXITCODE"
@@ -1579,7 +1579,7 @@ function New-QueClone {
         Write-Host "Initializing new repository..." -ForegroundColor Cyan
         Push-Location $CloneRoot
 
-        git init -b main
+        git init -b main 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git init failed"
@@ -1593,7 +1593,7 @@ function New-QueClone {
         git config --local push.autoSetupRemote true
 
         # Add remote
-        git remote add origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git"
+        git remote add origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | Out-Host
 
         Pop-Location
 
@@ -1611,19 +1611,19 @@ function New-QueClone {
 
         # Initial commit
         Push-Location $CloneRoot
-        git add .
+        git add . 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git add failed"
         }
 
-        git commit -m "Initial commit: QUE workspace setup"
+        git commit -m "Initial commit: QUE workspace setup" 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git commit failed"
         }
 
-        git push -u origin main
+        git push -u origin main 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git push failed"
@@ -1637,7 +1637,7 @@ function New-QueClone {
 
     # Configure Git LFS
     Push-Location $CloneRoot
-    git lfs install --local
+    git lfs install --local 2>&1 | Out-Host
     $LfsStoragePath = Join-Path $WorkspaceRoot "sync\git-lfs\lfs"
     git config --local lfs.storage $LfsStoragePath
     Pop-Location
