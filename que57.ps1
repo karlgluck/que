@@ -1336,7 +1336,7 @@ $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
     $ScriptContent = $ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes)), ''
 
     # Write the generated script
-    Set-Content -Path $OutputPath -Value $ScriptContent -Encoding UTF8
+    Set-Content -Path $OutputPath -Value $ScriptContent
 
     Write-Host "Generated: $OutputPath" -ForegroundColor Green
 }
@@ -2308,7 +2308,7 @@ function Invoke-QueMain {
 
                 $UpdatedContent = $ScriptContent -replace ('{0}QUE_SYNCTHING_BEGIN{0}[\s\S]*?{0}QUE_SYNCTHING_END{0}' -f @('###')), $NewSyncThingBlock
 
-                Set-Content -Path $ScriptPath -Value $UpdatedContent -Encoding UTF8
+                Set-Content -Path $ScriptPath -Value $UpdatedContent
 
                 Write-Host "Script updated with current device. Please commit this change to share with team." -ForegroundColor Green
             }
