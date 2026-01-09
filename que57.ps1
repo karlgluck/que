@@ -2143,6 +2143,18 @@ function Invoke-QueMain {
             }
         }
 
+        # Early check: If current folder is not empty and not a QUE workspace, error immediately
+        # This prevents users from entering their PAT before discovering they're in the wrong location
+        $CurrentFolderIsQueWorkspace = Test-Path ".que"
+        if (-not $CurrentFolderIsQueWorkspace) {
+            $CurrentItems = Get-ChildItem -Force -ErrorAction SilentlyContinue
+            if ($CurrentItems.Count -gt 0) {
+                Write-Error "Current folder is not empty. QUE workspace must be initialized in an empty folder."
+                Write-Host "Please create and navigate to an empty folder, then run this command again." -ForegroundColor Yellow
+                return
+            }
+        }
+
         # Detect workspace context
         $WorkspaceRoot = Find-QueWorkspace
 
