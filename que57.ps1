@@ -1588,7 +1588,8 @@ function New-QueClone {
         $env:GIT_LFS_SKIP_SMUDGE = '1'
 
         Push-Location $CloneRoot
-        git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 | Out-Host
+        $CloneOutput = & { git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 }
+        $CloneOutput | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git clone failed with exit code $LASTEXITCODE"
