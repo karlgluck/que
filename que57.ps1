@@ -817,7 +817,8 @@ function Ensure-SyncThingRunning {
         Ensures SyncThing is running, starts it if needed
     .DESCRIPTION
         Uses syncthing cli to check if running. Starts if needed.
-        Reads config from SyncThingHome if it exists.
+        Reads persistent GUI port from .que\syncthing\gui.port to ensure
+        consistent port assignment and proper instance detection/reuse.
         Returns device ID and GUI address info.
     #>
     param([string]$WorkspaceRoot)
@@ -881,21 +882,34 @@ function Ensure-SyncThingRunning {
         Write-Host "Generated and stored new SyncThing API key" -ForegroundColor Green
     }
 
-    # Try to read GUI address from existing config, or generate new one
-    if ((Test-Path $ConfigPath) -and -not $IsFirstTime) {
+    # Try to read persistent GUI port from .que directory
+    $PortFile = Join-Path $WorkspaceRoot ".que\syncthing\gui.port"
+    $PortFileDir = Split-Path $PortFile -Parent
+    if (-not (Test-Path $PortFileDir)) {
+        New-Item -ItemType Directory -Force -Path $PortFileDir | Out-Null
+    }
+
+    if (Test-Path $PortFile) {
         try {
-            [xml]$Config = Get-Content $ConfigPath
-            $GuiAddress = $Config.configuration.gui.address
-            Write-Host "Using existing SyncThing GUI address: $GuiAddress" -ForegroundColor Gray
+            $StoredPort = Get-Content $PortFile -Raw
+            $StoredPort = $StoredPort.Trim()
+            if ($StoredPort -match '^\d+$') {
+                $GuiAddress = "127.0.0.1:$StoredPort"
+                Write-Host "Using stored SyncThing port: $StoredPort" -ForegroundColor Gray
+            }
         } catch {
-            Write-Warning "Failed to parse config.xml for GUI address"
+            Write-Warning "Failed to read stored port: $($_.Exception.Message)"
         }
     }
 
+    # If no valid stored port, generate one
     if (-not $GuiAddress) {
         $Port = Get-AvailableSyncThingPort
         $GuiAddress = "127.0.0.1:$Port"
-        Write-Host "Generated new SyncThing GUI address: $GuiAddress" -ForegroundColor Gray
+
+        # Store the port persistently
+        $Port | Set-Content $PortFile
+        Write-Host "Generated and stored new SyncThing port: $Port" -ForegroundColor Green
     }
 
     # Check if SyncThing is running using CLI
