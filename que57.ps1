@@ -1490,11 +1490,11 @@ function New-QueWorkspace {
 
         # Get content from another repo
         Push-Location $CloneRoot
-        git remote add source $CloneFromSource 2>&1 | Out-Host
-        git fetch source 2>&1 | Out-Host
-        git merge source/main --allow-unrelated-histories -m "Import from $CloneFromSource" 2>&1 | Out-Host
-        git push origin main 2>&1 | Out-Host
-        git remote remove source 2>&1 | Out-Host
+        git remote add source $CloneFromSource 2>&1 | ForEach-Object { "$_" } | Out-Host
+        git fetch source 2>&1 | ForEach-Object { "$_" } | Out-Host
+        git merge source/main --allow-unrelated-histories -m "Import from $CloneFromSource" 2>&1 | ForEach-Object { "$_" } | Out-Host
+        git push origin main 2>&1 | ForEach-Object { "$_" } | Out-Host
+        git remote remove source 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
 
         Write-Host "Imported from source repository into $CloneRoot" -ForegroundColor Green
@@ -1508,15 +1508,15 @@ function New-QueWorkspace {
 
         # Commit and push
         Push-Location $CloneRoot
-        git add -A 2>&1 | Out-Host
-        git commit -m "Import from local repository" 2>&1 | Out-Host
-        git push origin main 2>&1 | Out-Host
+        git add -A 2>&1 | ForEach-Object { "$_" } | Out-Host
+        git commit -m "Import from local repository" 2>&1 | ForEach-Object { "$_" } | Out-Host
+        git push origin main 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
 
         Write-Host "Imported from local repository into $CloneRoot" -ForegroundColor Green
     } elseif ($InitMode -eq 3) {
         Push-Location $CloneRoot
-        git pull 2>&1 | Out-Host
+        git pull 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
 
         Write-Host "Pulled latest from repository into $CloneRoot" -ForegroundColor Green
@@ -1588,8 +1588,7 @@ function New-QueClone {
         $env:GIT_LFS_SKIP_SMUDGE = '1'
 
         Push-Location $CloneRoot
-        $CloneOutput = & { git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 }
-        $CloneOutput | Out-Host
+        git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git clone failed with exit code $LASTEXITCODE"
@@ -1622,7 +1621,7 @@ function New-QueClone {
         Write-Host "Initializing new repository..." -ForegroundColor Cyan
         Push-Location $CloneRoot
 
-        git init -b main 2>&1 | Out-Host
+        git init -b main 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git init failed"
@@ -1636,7 +1635,7 @@ function New-QueClone {
         git config --local push.autoSetupRemote true
 
         # Add remote
-        git remote add origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | Out-Host
+        git remote add origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
 
         Pop-Location
 
@@ -1654,19 +1653,19 @@ function New-QueClone {
 
         # Initial commit
         Push-Location $CloneRoot
-        git add . 2>&1 | Out-Host
+        git add . 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git add failed"
         }
 
-        git commit -m "Initial commit: QUE workspace setup" 2>&1 | Out-Host
+        git commit -m "Initial commit: QUE workspace setup" 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git commit failed"
         }
 
-        git push -u origin main 2>&1 | Out-Host
+        git push -u origin main 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git push failed"
@@ -1680,7 +1679,7 @@ function New-QueClone {
 
     # Configure Git LFS
     Push-Location $CloneRoot
-    git lfs install --local 2>&1 | Out-Host
+    git lfs install --local 2>&1 | ForEach-Object { "$_" } | Out-Host
     $LfsStoragePath = Join-Path $WorkspaceRoot "sync\git-lfs\lfs"
     git config --local lfs.storage $LfsStoragePath
     Pop-Location
