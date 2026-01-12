@@ -363,14 +363,38 @@ function Find-UProjectFile {
     param([string]$CloneRoot)
     $Queue = @(Get-ChildItem -Path $CloneRoot -Directory -ErrorAction SilentlyContinue)
     $UProjects = @()
+    $Visited = @{}  # Track visited directories to prevent infinite loops
+    $MaxIterations = 10000  # Safety limit
+    $Iterations = 0
+
     $RootProjects = Get-ChildItem -Path $CloneRoot -Filter "*.uproject" -ErrorAction SilentlyContinue
     if ($RootProjects) { $UProjects += $RootProjects }
+
     while ($Queue.Count -gt 0) {
+        $Iterations++
+        if ($Iterations -gt $MaxIterations) {
+            Write-Warning "Search iteration limit reached. Possible circular directory reference detected."
+            break
+        }
+
         $Current = $Queue[0]
-        $Queue = $Queue[1..($Queue.Count - 1)]
+        # More robust array slicing
+        if ($Queue.Count -eq 1) {
+            $Queue = @()
+        } else {
+            $Queue = $Queue[1..($Queue.Count - 1)]
+        }
+
+        # Skip if already visited (prevents circular references)
+        $CurrentPath = $Current.FullName
+        if ($Visited.ContainsKey($CurrentPath)) { continue }
+        $Visited[$CurrentPath] = $true
+
         if ($Current.Name -in @('Samples', 'Templates', 'Binaries', 'Intermediate', 'Saved')) { continue }
+
         $Projects = Get-ChildItem -Path $Current.FullName -Filter "*.uproject" -ErrorAction SilentlyContinue
         if ($Projects) { $UProjects += $Projects }
+
         $SubDirs = Get-ChildItem -Path $Current.FullName -Directory -ErrorAction SilentlyContinue
         $Queue += $SubDirs
     }
