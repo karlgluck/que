@@ -260,10 +260,25 @@ function Wait-ForUserConfirmation {
 function Get-SyncThingProcessCount {
     <#
     .SYNOPSIS
-        Counts running SyncThing instances.
+        Counts running SyncThing instances (main processes only, not helper processes).
     #>
     $processes = @(Get-Process -Name "syncthing" -ErrorAction SilentlyContinue)
-    return $processes.Count
+
+    # Count only parent processes (those whose parent is not another syncthing process)
+    $syncthingPIDs = $processes | ForEach-Object { $_.Id }
+    $parentProcesses = $processes | Where-Object {
+        try {
+            $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue |
+                      Select-Object -ExpandProperty ParentProcessId
+            # Include this process if its parent is not a syncthing process
+            return $parent -notin $syncthingPIDs
+        } catch {
+            # If we can't determine parent, count it as a main process
+            return $true
+        }
+    }
+
+    return $parentProcesses.Count
 }
 
 function Invoke-QueScriptWithInput {
@@ -565,6 +580,17 @@ Write-Host "Loading que57.ps1 functions..." -ForegroundColor Cyan
 
 # Load que57.ps1 content into $queScript variable (required by New-QueRepoScript)
 $script:queScript = Get-Content -Path $QueScript -Raw -Encoding UTF8
+
+# Override Get-UserSelectionIndex to automate initialization method selection (0 = blank project)
+# This allows automated testing without user interaction
+if (Get-Command Get-UserSelectionIndex -ErrorAction SilentlyContinue) {
+    Write-Host "Overriding Get-UserSelectionIndex for test automation..." -ForegroundColor Gray
+}
+function Get-UserSelectionIndex {
+    Param ([string[]]$Options, [int]$Default, [switch]$DontShortcutSingleChoice)
+    Write-Host "[Test automation] Auto-selecting: $($Options[0])" -ForegroundColor Gray
+    return 0
+}
 
 # Change to test root for workspace creation
 Push-Location $script:TestRoot
@@ -1136,10 +1162,10 @@ try {
 
             # Display diagnostic information
             $SyncCount = Get-SyncThingProcessCount
-            Write-Host "SyncThing processes running: $SyncCount" -ForegroundColor Yellow
+            Write-Host "SyncThing instances running: $SyncCount" -ForegroundColor Yellow
 
             if ($SyncCount -lt 2) {
-                Write-Host "WARNING: Expected 2 SyncThing processes for sync to work" -ForegroundColor Yellow
+                Write-Host "WARNING: Expected 2 SyncThing instances for sync to work" -ForegroundColor Yellow
             }
 
             # Ask user if they want to continue waiting
@@ -1266,10 +1292,10 @@ try {
 
             # Display diagnostic information
             $SyncCount = Get-SyncThingProcessCount
-            Write-Host "SyncThing processes running: $SyncCount" -ForegroundColor Yellow
+            Write-Host "SyncThing instances running: $SyncCount" -ForegroundColor Yellow
 
             if ($SyncCount -lt 2) {
-                Write-Host "WARNING: Expected 2 SyncThing processes for sync to work" -ForegroundColor Yellow
+                Write-Host "WARNING: Expected 2 SyncThing instances for sync to work" -ForegroundColor Yellow
             }
 
             # Check if the source file exists in workspace 2
@@ -1587,7 +1613,8 @@ function Invoke-Cleanup {
     # Stop SyncThing processes
     $syncProcesses = Get-Process -Name "syncthing" -ErrorAction SilentlyContinue
     if ($syncProcesses) {
-        Write-Host "Found $($syncProcesses.Count) SyncThing process(es) running" -ForegroundColor Yellow
+        $instanceCount = Get-SyncThingProcessCount
+        Write-Host "Found $instanceCount SyncThing instance(s) running ($($syncProcesses.Count) processes total)" -ForegroundColor Yellow
         if (-not $KeepArtifacts) {
             $stopSync = Read-Host "Stop SyncThing processes? (y/N)"
             if ($stopSync -eq 'y' -or $stopSync -eq 'Y') {
