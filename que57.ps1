@@ -673,7 +673,6 @@ function Ensure-SyncThingRunning {
         Start-Sleep -Seconds 5
     } else {
         Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
-        & $SyncThingExe browser --home="$SyncThingHome"
     }
     $DeviceIdList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>$null
     $DeviceId = $DeviceIdList | Select-Object -First 1
@@ -1468,6 +1467,16 @@ function Package-UnrealProject {
     }
 }
 
+function Open-SyncThingBrowser {
+    $SyncThingHome = "$WorkspaceRoot\.que\syncthing"
+    $SyncThingExe = Get-SyncThingExecutable
+    if (-not $SyncThingExe) {
+        Write-Host "SyncThing executable not found" -ForegroundColor Red
+        return
+    }
+    & $SyncThingExe browser --home="$SyncThingHome"
+}
+
 function Show-WorkspaceInfo {
     Write-Host "`n===============================================================" -ForegroundColor Cyan
     Write-Host "  QUE Workspace Information" -ForegroundColor Green
@@ -1675,15 +1684,16 @@ function Invoke-QueMain {
             Write-Host "===============================================================`n" -ForegroundColor Cyan
             while ($true) {
                 Write-Host "Commands: " -NoNewline -ForegroundColor White
-                Write-Host "open, build, clean, package, info, exit" -ForegroundColor Gray
+                Write-Host "open, build, clean, package, syncthing, info, exit" -ForegroundColor Gray
                 $Command = Read-Host "`nQUE>"
                 switch ($Command.ToLower()) {
-                    "open"    { Open-UnrealProject }
-                    "build"   { Build-UnrealProject }
-                    "clean"   { Clean-UnrealProject }
-                    "package" { Package-UnrealProject }
-                    "info"    { Show-WorkspaceInfo }
-                    "exit"    { return }
+                    "open"      { Open-UnrealProject }
+                    "build"     { Build-UnrealProject }
+                    "clean"     { Clean-UnrealProject }
+                    "package"   { Package-UnrealProject }
+                    "syncthing" { Open-SyncThingBrowser }
+                    "info"      { Show-WorkspaceInfo }
+                    "exit"      { return }
                     ""        { continue }
                     default   { Write-Host "Unknown command: $Command" -ForegroundColor Red }
                 }
