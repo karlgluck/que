@@ -63,6 +63,7 @@ Once your workspace is set up, launch the management terminal using the shortcut
 - **pull** - Pull latest changes from GitHub (with stashing)
 - **push** - Commit all changes and push to GitHub (with rebase)
 - **package** - Create standalone client and server builds
+- **syncthing** - Open the SyncThing web UI
 - **info** - Display workspace and project information
 
 ## Creating GitHub Personal Access Token
