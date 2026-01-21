@@ -1370,6 +1370,7 @@ function Invoke-UnrealPackage {
 }
 
 function Open-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nOpening Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1404,6 +1405,7 @@ function Open-UnrealProject {
 }
 
 function Build-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nBuilding Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1431,6 +1433,7 @@ function Build-UnrealProject {
 }
 
 function Clean-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nCleaning Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1445,6 +1448,7 @@ function Clean-UnrealProject {
 }
 
 function Package-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nPackaging Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1468,6 +1472,7 @@ function Package-UnrealProject {
 }
 
 function Open-SyncThingBrowser {
+    param([string]$WorkspaceRoot)
     $SyncThingHome = "$WorkspaceRoot\.que\syncthing"
     $SyncThingExe = Get-SyncThingExecutable
     if (-not $SyncThingExe) {
@@ -1478,6 +1483,8 @@ function Open-SyncThingBrowser {
 }
 
 function Show-WorkspaceInfo {
+    param([string]$WorkspaceRoot, [string]$CloneRoot)
+    $CloneName = Split-Path $CloneRoot -Leaf
     Write-Host "`n===============================================================" -ForegroundColor Cyan
     Write-Host "  QUE Workspace Information" -ForegroundColor Green
     Write-Host "===============================================================" -ForegroundColor Cyan
@@ -1490,7 +1497,7 @@ function Show-WorkspaceInfo {
     $RepoVersion = Get-Content "$WorkspaceRoot\.que\repo\$CloneName\repo-version" -ErrorAction SilentlyContinue
     Write-Host "  Version: $(if ($RepoVersion) { $RepoVersion } else { 'Not set' })"
     Write-Host "`nGitHub:" -ForegroundColor Yellow
-    Write-Host "  Repository: $GitHubOwner/$GitHubRepo"
+    Write-Host "  Repository: $script:GitHubOwner/$script:GitHubRepo"
     Push-Location $CloneRoot
     $GitUser = git config user.name
     if ($LASTEXITCODE -eq 0) {
@@ -1509,7 +1516,7 @@ function Show-WorkspaceInfo {
     if ($UProjectPath) {
         Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
         Write-Host "  Project: $UProjectPath"
-        Write-Host "  Version: $UnrealEngineVersion"
+        Write-Host "  Version: $script:UnrealEngineVersion"
     } else {
         Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
         Write-Host "  No .uproject file found"
@@ -1678,7 +1685,7 @@ function Invoke-QueMain {
             $CloneName = Split-Path $CloneRoot -Leaf
             Write-UEGitConfigFiles -CloneRoot $CloneRoot
             Write-Host "`n===============================================================" -ForegroundColor Cyan
-            Write-Host "  QUE - $GitHubOwner/$GitHubRepo" -ForegroundColor Green
+            Write-Host "  QUE - $script:GitHubOwner/$script:GitHubRepo" -ForegroundColor Green
             Write-Host "  Clone: $CloneName" -ForegroundColor Yellow
             Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
             Write-Host "===============================================================`n" -ForegroundColor Cyan
@@ -1687,12 +1694,12 @@ function Invoke-QueMain {
                 Write-Host "open, build, clean, package, syncthing, info, exit" -ForegroundColor Gray
                 $Command = Read-Host "`nQUE>"
                 switch ($Command.ToLower()) {
-                    "open"      { Open-UnrealProject }
-                    "build"     { Build-UnrealProject }
-                    "clean"     { Clean-UnrealProject }
-                    "package"   { Package-UnrealProject }
-                    "syncthing" { Open-SyncThingBrowser }
-                    "info"      { Show-WorkspaceInfo }
+                    "open"      { Open-UnrealProject -CloneRoot $CloneRoot }
+                    "build"     { Build-UnrealProject -CloneRoot $CloneRoot }
+                    "clean"     { Clean-UnrealProject -CloneRoot $CloneRoot }
+                    "package"   { Package-UnrealProject -CloneRoot $CloneRoot }
+                    "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $WorkspaceRoot }
+                    "info"      { Show-WorkspaceInfo -WorkspaceRoot $WorkspaceRoot -CloneRoot $CloneRoot }
                     "exit"      { return }
                     ""        { continue }
                     default   { Write-Host "Unknown command: $Command" -ForegroundColor Red }
