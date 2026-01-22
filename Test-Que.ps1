@@ -54,7 +54,8 @@
 
 .PARAMETER GitHubToken
     GitHub Personal Access Token with repo creation permissions. If not provided,
-    the script will prompt securely.
+    the script will check the QUE_TEST_GITHUB_PAT environment variable, or prompt
+    securely and save the token to that session variable for this PowerShell session.
 
 .PARAMETER KeepArtifacts
     Skip cleanup prompts and keep all test artifacts for inspection.
@@ -466,12 +467,24 @@ if (-not $syncthingFound) {
 # Step 1.2: GitHub Token Acquisition
 Write-TestStep "Acquiring GitHub token"
 if (-not $GitHubToken) {
-    Write-Host "GitHub Personal Access Token is required for testing." -ForegroundColor Yellow
-    Write-Host "The token needs 'repo' permissions to create and delete repositories." -ForegroundColor Yellow
-    $secureToken = Read-Host "Enter GitHub PAT" -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
-    $GitHubToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+    # Try to get token from environment variable
+    if ($env:QUE_TEST_GITHUB_PAT) {
+        $GitHubToken = $env:QUE_TEST_GITHUB_PAT
+        Write-Host "Using GitHub PAT from environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Gray
+    }
+    else {
+        Write-Host "GitHub Personal Access Token is required for testing." -ForegroundColor Yellow
+        Write-Host "The token needs 'repo' permissions to create and delete repositories." -ForegroundColor Yellow
+        Write-Host "To avoid re-entering the token in this session, it will be saved to environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Yellow
+        $secureToken = Read-Host "Enter GitHub PAT" -AsSecureString
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+        $GitHubToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+
+        # Save to session environment variable for this PowerShell session only
+        $env:QUE_TEST_GITHUB_PAT = $GitHubToken
+        Write-Host "GitHub PAT saved to session environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Green
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
@@ -689,7 +702,7 @@ try {
             Write-TestFailure "Could not find first clone directory"
         }
 
-        $GeneratedScript = Join-Path $FirstClone.FullName "que-$($script:TestResults.GitHubRepoName).ps1"
+        $GeneratedScript = Join-Path $FirstClone.FullName "que57-project.ps1"
         if (-not (Test-Path $GeneratedScript)) {
             Write-TestFailure "Generated script not found at: $GeneratedScript"
         }
@@ -887,7 +900,7 @@ try {
         $Workspace2ClonePath = $Workspace2Clone.FullName
         $Workspace2CloneName = $Workspace2Clone.Name
         $Workspace2LnkPath = Join-Path $script:TestResults.Workspace2Path "open-$Workspace2CloneName.lnk"
-        $Workspace2ScriptPath = Join-Path $Workspace2ClonePath "que-$($script:TestResults.GitHubRepoName).ps1"
+        $Workspace2ScriptPath = Join-Path $Workspace2ClonePath "que57-project.ps1"
 
         if (-not (Test-Path $Workspace2LnkPath)) {
             Write-TestFailure "Workspace 2 .lnk file not found at: $Workspace2LnkPath"
@@ -912,7 +925,7 @@ try {
         Push-Location $Workspace2ClonePath
 
         # Check git status for changes
-        $GitStatus = git status --porcelain "que-$($script:TestResults.GitHubRepoName).ps1" 2>&1
+        $GitStatus = git status --porcelain "que57-project.ps1" 2>&1
 
         if ([string]::IsNullOrWhiteSpace($GitStatus)) {
             Write-Host "WARNING: No changes detected in que script. Device ID may already be registered." -ForegroundColor Yellow
@@ -923,7 +936,7 @@ try {
         }
 
         # Check git diff to see what changed
-        $GitDiff = git diff "que-$($script:TestResults.GitHubRepoName).ps1" 2>&1
+        $GitDiff = git diff "que57-project.ps1" 2>&1
         if ($GitDiff) {
             Write-Host "`nChanges in que script:" -ForegroundColor Gray
             $GitDiff | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
@@ -937,7 +950,7 @@ try {
         # Step 6.3: Commit and push the change
         Write-Host "`nStep 6.3: Committing and pushing SyncThing device ID" -ForegroundColor Cyan
 
-        git add "que-$($script:TestResults.GitHubRepoName).ps1"
+        git add "que57-project.ps1"
         if ($LASTEXITCODE -ne 0) {
             # If add fails, it might mean there's nothing to add (already committed)
             Write-Host "Git add returned non-zero. Checking if there are changes to commit..." -ForegroundColor Yellow
@@ -982,7 +995,7 @@ try {
         Write-TestSuccess "Pulled changes in workspace 1"
 
         # Verify the que script was updated
-        $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que-$($script:TestResults.GitHubRepoName).ps1"
+        $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que57-project.ps1"
         $ScriptContent = Get-Content $Workspace1ScriptPath -Raw
 
         if ($ScriptContent -match '\$SyncThingDevices\s*=\s*@\(') {
@@ -1415,7 +1428,7 @@ try {
             Write-TestFailure "Could not find first workspace clone directory"
         }
 
-        $GeneratedScript = Join-Path $Workspace1Clone.FullName "que-$($script:TestResults.GitHubRepoName).ps1"
+        $GeneratedScript = Join-Path $Workspace1Clone.FullName "que57-project.ps1"
         if (-not (Test-Path $GeneratedScript)) {
             Write-TestFailure "Generated script not found at: $GeneratedScript"
         }

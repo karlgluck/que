@@ -47,7 +47,7 @@ workspace-root/
 |   +-- depot/               # Shared asset depot
 +-- env/                     # Environment data (PAT, SyncThing)
 +-- repo/                    # Repository clones
-|   +-- kauilani/            # Clone directory (Hawaiian-sounding name)
+|   +-- kauilani/            # Clone directory (random Hawaiian-sounding name)
 |       +-- que57-project.ps1 # Project management script
 |       +-- ProjectName/     # Unreal project
 +-- open-kauilani.lnk        # Shortcut to launch clone
