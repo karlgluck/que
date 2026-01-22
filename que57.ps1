@@ -211,11 +211,11 @@ workspace-root/
 |   +-- depot/               # Shared asset depot
 +-- env/                     # Environment data (PAT, SyncThing)
 +-- repo/                    # Repository clones
-    +-- YYYY-MM-DD-A/        # Clone directory
+    +-- kauilani/            # Clone directory (random name)
         +-- que57-project.ps1 # Project management script
 ```
 
-**Clone Naming:** Each time you create a new clone, it's named with today's date plus a letter suffix (A-Z, then Z1, Z2, etc.). This lets you maintain multiple working copies simultaneously.
+**Clone Naming:** Each clone gets a unique Hawaiian-sounding name (e.g., Kauilani, Mahalo, Wakena) to make the randomness more pleasant and easily recognized.
 
 ## How It Works
 
@@ -335,26 +335,74 @@ function Test-GitHubPAT {
 }
 
 function Get-NextCloneName {
-    # Generates next clone directory name: YYYY-MM-DD-A, -B, ..., -Z, -Z1, -Z2, ...
+    # Generates a unique Hawaiian-sounding clone directory name
     param([string]$WorkspaceRoot)
-    $Today = Get-Date -Format "yyyy-MM-dd"
     $RepoDir = Join-Path $WorkspaceRoot "repo"
-    if (-not (Test-Path $RepoDir)) { return "$Today-A" }
-    $ExistingClones = Get-ChildItem $RepoDir -Directory |
-        Where-Object { $_.Name -match "^$Today-(.+)$" } |
-        ForEach-Object { $matches[1] } |
-        Sort-Object
-    if (-not $ExistingClones) { return "$Today-A" }
-    $LastSuffix = $ExistingClones[-1]
-    if ($LastSuffix -match '^[A-Y]$') {
-        return "$Today-$([char]([int][char]$LastSuffix + 1))"
+    $ExistingNames = @()
+    if (Test-Path $RepoDir) {
+        $ExistingNames = @(Get-ChildItem $RepoDir -Directory | ForEach-Object { $_.Name.ToLower() })
     }
-    if ($LastSuffix -eq 'Z') { return "$Today-Z1" }
-    if ($LastSuffix -match '^Z(\d+)$') {
-        $Number = [int]$matches[1] + 1
-        return "$Today-Z$Number"
+    # Hawaiian phoneme sets
+    [string[]]$Vowels = @('a','e','i','o','u')
+    [string[]]$Consonants = @('h','k','l','m','n','p','w')
+    [string[]]$Onsets = @(
+        '', 'h','k','l','m','n','p','w',
+        'ha','he','hi','ho','hu',
+        'ka','ke','ki','ko','ku',
+        'la','le','li','lo','lu',
+        'ma','me','mi','mo','mu',
+        'na','ne','ni','no','nu',
+        'pa','pe','pi','po','pu',
+        'wa','we','wi','wo','wu'
+    )
+    [string[]]$Diphthongs = @('ai','ae','ao','au','ei','eu','oi','ou','ia','io','iu')
+    # Generate unique names until we find one that doesn't exist
+    $MaxAttempts = 100
+    for ($Attempt = 0; $Attempt -lt $MaxAttempts; $Attempt++) {
+        $Length = Get-Random -Minimum 5 -Maximum 11
+        $Syllables = @()
+        $CurrentLength = 0
+        while ($CurrentLength -lt $Length) {
+            if ($Syllables.Count -eq 0) {
+                # First syllable - can start with vowel or consonant
+                if ((Get-Random -Maximum 10) -lt 4) {
+                    $Syl = $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                } else {
+                    $Syl = $Onsets[(Get-Random -Maximum $Onsets.Count)]
+                    if ($Syl -eq '') { $Syl = $Vowels[(Get-Random -Maximum $Vowels.Count)] }
+                }
+            } else {
+                # Subsequent syllables
+                if ((Get-Random -Maximum 10) -lt 5) {
+                    if ((Get-Random -Maximum 10) -lt 6) {
+                        $Syl = $Diphthongs[(Get-Random -Maximum $Diphthongs.Count)]
+                    } else {
+                        $Syl = $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                    }
+                } else {
+                    $C = $Consonants[(Get-Random -Maximum $Consonants.Count)]
+                    $V = $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                    $Syl = $C + $V
+                }
+            }
+            if (($CurrentLength + $Syl.Length) -le $Length + 2) {
+                $Syllables += $Syl
+                $CurrentLength += $Syl.Length
+            } else {
+                if ($CurrentLength -lt $Length) {
+                    $Syllables += $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                    $CurrentLength += 1
+                }
+                break
+            }
+        }
+        $Word = ($Syllables -join '').Trim()
+        if ($Word -and ($Word.ToLower() -notin $ExistingNames)) {
+            return $Word
+        }
     }
-    throw "Unable to generate next clone name from: $LastSuffix"
+    # Fallback: append timestamp if all attempts fail
+    return "Clone-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 }
 
 function Find-UProjectFile {
