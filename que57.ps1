@@ -165,7 +165,7 @@ To set up your development environment and join this project:
 3. Run this command in PowerShell:
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -useb -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -useb -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que57-project.ps1")).Content)
 ```
 
 3. Follow the prompts to:
@@ -193,7 +193,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 
 ## Management Commands
 
-Once your workspace is set up, launch the management terminal using `que-{{REPO}}.ps1`:
+Once your workspace is set up, launch the management terminal using `que57-project.ps1`:
 
 - **open** - Generate project files, build, and launch UE editor
 - **build** - Build the editor target
@@ -212,7 +212,7 @@ workspace-root/
 +-- env/                     # Environment data (PAT, SyncThing)
 +-- repo/                    # Repository clones
     +-- YYYY-MM-DD-A/        # Clone directory
-        +-- que-{{REPO}}.ps1 # Project management script
+        +-- que57-project.ps1 # Project management script
 ```
 
 **Clone Naming:** Each time you create a new clone, it's named with today's date plus a letter suffix (A-Z, then Z1, Z2, etc.). This lets you maintain multiple working copies simultaneously.
@@ -908,7 +908,7 @@ function New-QueRepoScript {
     # Generates project-specific que-repo-name.ps1 script with marker-based substitution
     param([string]$CloneRoot, [string]$Owner, [string]$Repo, [string]$SyncThingDeviceId = "")
     $ThreeHashes = '###'
-    $OutputPath = "$CloneRoot\que-$Repo.ps1"
+    $OutputPath = "$CloneRoot\que57-project.ps1"
     $ScriptContent = $queScript
     # Update constants section
     $ConstantsBlock = @"
@@ -1148,7 +1148,7 @@ function New-QueClone {
         Write-GitConfigFiles -CloneRoot $CloneRoot
         $ReadmeContent = $EmbeddedReadme -replace '{{OWNER}}', $GitHubOwner -replace '{{REPO}}', $GitHubRepo
         Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
-        Write-Host "Generating que-$GitHubRepo.ps1..." -ForegroundColor Cyan
+        Write-Host "Generating que57-project.ps1..." -ForegroundColor Cyan
         $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
         New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
         Push-Location $CloneRoot
@@ -1177,7 +1177,7 @@ function New-QueClone {
     git config --local lfs.storage $LfsStoragePath
     Pop-Location
     $ShortcutPath = "$WorkspaceRoot\open-$CloneName.lnk"
-    $TargetScript = "$CloneRoot\que-$GitHubRepo.ps1"
+    $TargetScript = "$CloneRoot\que57-project.ps1"
     New-WindowsShortcut -ShortcutPath $ShortcutPath -TargetScript $TargetScript
     Write-Host "Created shortcut: $ShortcutPath" -ForegroundColor Green
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"

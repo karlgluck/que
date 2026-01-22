@@ -48,20 +48,18 @@ workspace-root/
 +-- env/                     # Environment data (PAT, SyncThing)
 +-- repo/                    # Repository clones
 |   +-- 2025-11-26-A/        # Clone directory
-|       +-- que-project.ps1  # Project management script
+|       +-- que57-project.ps1 # Project management script
 |       +-- ProjectName/     # Unreal project
 +-- open-2025-11-26-A.lnk    # Shortcut to launch clone
 ```
 
 ## Management Commands
 
-Once your workspace is set up, launch the management terminal using the shortcut or by running `que-REPONAME.ps1`:
+Once your workspace is set up, launch the management terminal using the shortcut or by running `que57-project.ps1`:
 
 - **open** - Generate project files, build, and launch UE editor
 - **build** - Build the editor target
 - **clean** - Delete intermediate files for full rebuild
-- **pull** - Pull latest changes from GitHub (with stashing)
-- **push** - Commit all changes and push to GitHub (with rebase)
 - **package** - Create standalone client and server builds
 - **syncthing** - Open the SyncThing web UI
 - **info** - Display workspace and project information
