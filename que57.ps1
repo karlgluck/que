@@ -662,6 +662,7 @@ function Ensure-SyncThingRunning {
             "--gui-apikey=$ApiKey"
             "--unpaused"
             "--no-upgrade"
+            "--no-browser"
         )
         Write-Host "$StartArgs"
         $StartProcessArgs = @{
