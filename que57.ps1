@@ -1523,27 +1523,67 @@ function Invoke-QueSaveCommand {
     return $CurrentBranch
 }
 
-function Invoke-QueOpenBranchCommand {
-    param([string]$CloneRoot, [string]$Name)
-    if (-not $Name) { throw "Branch name is required for 'que open'." }
-    # Wait for SyncThing to sync LFS files before switching branches
-    $WorkspaceRoot = Find-QueWorkspace -StartPath $CloneRoot
-    if ($WorkspaceRoot) {
-        Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
-    }
+function Invoke-QueLoadCommand {
+    param([string]$WorkspaceRoot, [string]$SourceCloneRoot, [string]$Name, [switch]$SkipLaunch = $false)
+    if (-not $Name) { throw "Branch name is required for 'que load'." }
     $BranchName = "que/$Name"
-    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $BranchName) | Out-Null
-    $RemoteCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/remotes/origin/$BranchName") -AllowFailure
+    $ExistingCloneRoot = $null
+    $RepoDir = Join-Path $WorkspaceRoot "repo"
+    if (Test-Path $RepoDir) {
+        foreach ($CloneDir in Get-ChildItem $RepoDir -Directory) {
+            $ClonePath = $CloneDir.FullName
+            $HasBranch = $false
+            $LocalBranchCheck = Invoke-QueGit -WorkingDir $ClonePath -GitArgs @("show-ref", "--verify", "refs/heads/$BranchName") -AllowFailure
+            if ($LocalBranchCheck.ExitCode -eq 0) {
+                $HasBranch = $true
+            } else {
+                $CurrentBranch = Invoke-QueGit -WorkingDir $ClonePath -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
+                if ($CurrentBranch.ExitCode -eq 0 -and ($CurrentBranch.Output | Select-Object -First 1) -eq $BranchName) {
+                    $HasBranch = $true
+                }
+            }
+            if ($HasBranch) {
+                $ExistingCloneRoot = $ClonePath
+                break
+            }
+        }
+    }
+    if ($ExistingCloneRoot) {
+        $ExistingCloneName = Split-Path $ExistingCloneRoot -Leaf
+        $ShortcutPath = Join-Path $WorkspaceRoot "open-$ExistingCloneName.lnk"
+        if ((-not $SkipLaunch) -and (Test-Path $ShortcutPath)) {
+            Start-Process -FilePath $ShortcutPath | Out-Null
+        } else {
+            Write-Host "Found existing clone for $BranchName at $ExistingCloneRoot" -ForegroundColor Green
+        }
+        return $ExistingCloneRoot
+    }
+    if (-not $SourceCloneRoot) {
+        throw "A source clone path is required for 'que load'."
+    }
+    $RemoteCheck = Invoke-QueGit -WorkingDir $SourceCloneRoot -GitArgs @("ls-remote", "--exit-code", "origin", $BranchName) -AllowFailure
     if ($RemoteCheck.ExitCode -ne 0) {
         throw "Work branch $BranchName does not exist on origin."
     }
-    $LocalCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/heads/$BranchName") -AllowFailure
-    if ($LocalCheck.ExitCode -eq 0) {
-        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $BranchName) | Out-Null
-    } else {
-        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", "-c", $BranchName, "--track", "origin/$BranchName") | Out-Null
+    $TargetClonePath = Join-Path $WorkspaceRoot "repo\$Name"
+    if (Test-Path $TargetClonePath) {
+        $CurrentBranch = Invoke-QueGit -WorkingDir $TargetClonePath -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
+        $CurrentBranchName = if ($CurrentBranch.ExitCode -eq 0) { $CurrentBranch.Output | Select-Object -First 1 } else { "(unknown)" }
+        throw "Clone path already exists at $TargetClonePath (current branch: $CurrentBranchName). Please open that clone or choose a different branch name."
     }
-    Write-Host "Switched to $BranchName" -ForegroundColor Green
+    Write-Host "Loading $BranchName into a new clone..." -ForegroundColor Cyan
+    $CloneRoot = Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $Name -SkipLaunch
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $BranchName) | Out-Null
+    $SwitchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", "-c", $BranchName, "--track", "origin/$BranchName") -AllowFailure
+    if ($SwitchResult.ExitCode -ne 0) {
+        throw "Failed to switch clone to $BranchName.`n$($SwitchResult.Output -join "`n")"
+    }
+    Write-Host "Loaded $BranchName into clone $(Split-Path $CloneRoot -Leaf)" -ForegroundColor Green
+    $ShortcutPath = Join-Path $WorkspaceRoot "open-$((Split-Path $CloneRoot -Leaf)).lnk"
+    if ((-not $SkipLaunch) -and (Test-Path $ShortcutPath)) {
+        Start-Process -FilePath $ShortcutPath | Out-Null
+    }
+    return $CloneRoot
 }
 
 function Invoke-QueImportCommand {
@@ -2212,7 +2252,7 @@ function Invoke-QueMain {
                             "new"     { Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $Arg1 | Out-Null }
                             "clone"   { Invoke-QueCloneCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -CloneName $Arg1 | Out-Null }
                             "save"    { Invoke-QueSaveCommand -CloneRoot $CloneRoot | Out-Null }
-                            "open"    { Invoke-QueOpenBranchCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
+                            "load"    { Invoke-QueLoadCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -Name $Arg1 | Out-Null }
                             "import"  { Invoke-QueImportCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
                             "update"  { Invoke-QueUpdateCommand -CloneRoot $CloneRoot | Out-Null }
                             "rename"  { Invoke-QueRenameCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
@@ -2221,7 +2261,7 @@ function Invoke-QueMain {
                                 $TagName = if ($Tokens.Count -gt 2) { $Tokens[2] } else { $null }
                                 Invoke-QuePublishCommand -CloneRoot $CloneRoot -TagName $TagName | Out-Null
                             }
-                            default   { Write-Host "Unknown que command. Available: new, clone, save, open, import, update, rename, reset, publish [tag=$script:QueDefaultPublishTag]" -ForegroundColor Red }
+                            default   { Write-Host "Unknown que command. Available: new, clone, save, load, import, update, rename, reset, publish [tag=$script:QueDefaultPublishTag]" -ForegroundColor Red }
                         }
                     } catch {
                         Write-Host $_.Exception.Message -ForegroundColor Red
