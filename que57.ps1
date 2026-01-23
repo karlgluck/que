@@ -876,15 +876,15 @@ function Wait-ForSyncThingLfsSync {
         [switch]$Silent
     )
 
-    # Get SyncThing configuration
+    # Get SyncThing configuration (same paths as Ensure-SyncThingRunning)
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     if (-not (Test-Path $SyncThingHome)) {
         if (-not $Silent) { Write-Host "SyncThing not configured, skipping sync wait" -ForegroundColor Yellow }
         return $true
     }
 
-    $ApiKeyFile = Join-Path $WorkspaceRoot "env\syncthing-home\.api-key"
-    $PortFile = Join-Path $WorkspaceRoot "env\syncthing-home\.port"
+    $ApiKeyFile = Join-Path $WorkspaceRoot "env\syncthing\api.key"
+    $PortFile = Join-Path $WorkspaceRoot ".que\syncthing\gui.port"
 
     if (-not (Test-Path $ApiKeyFile) -or -not (Test-Path $PortFile)) {
         if (-not $Silent) { Write-Host "SyncThing configuration incomplete, skipping sync wait" -ForegroundColor Yellow }
@@ -892,8 +892,12 @@ function Wait-ForSyncThingLfsSync {
     }
 
     try {
-        $ApiKey = Get-Content $ApiKeyFile -Raw -ErrorAction Stop
-        $ApiKey = $ApiKey.Trim()
+        # Decrypt the API key (stored as SecureString)
+        $SecureString = Get-Content $ApiKeyFile | ConvertTo-SecureString
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+        $ApiKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+
         $Port = Get-Content $PortFile -Raw -ErrorAction Stop
         $Port = $Port.Trim()
         $GuiAddress = "127.0.0.1:$Port"
@@ -908,7 +912,7 @@ function Wait-ForSyncThingLfsSync {
         return $true
     }
 
-    $LfsFolderId = "$GitHubRepo-git-lfs"
+    $LfsFolderId = "$GitHubRepo-lfs"
 
     # Check if we need to wait at all
     $BaseUrl = "http://$GuiAddress/rest"
