@@ -903,7 +903,7 @@ function Install-AllDependencies {
     Sync-WingetPackage -PackageName 'EpicGames.EpicGamesLauncher'
     Sync-WingetPackage -PackageName 'Microsoft.DotNet.Framework.DeveloperPack_4'
     Install-NetFx3WithElevation | Out-Null
-    & (where.exe git) lfs install | Out-Null
+    & (where.exe git | Select-Object -First 1) lfs install | Out-Null
     Sync-WingetPackage -PackageName 'GitHub.GitLFS'
     Sync-WingetPackage -PackageName 'Syncthing.Syncthing'
     $VSBuildToolsParams = @{
@@ -1169,11 +1169,23 @@ function New-QueClone {
             throw "Source path not found: $SourcePath"
         }
         Write-Host "Cloning from existing workspace state at $SourcePath..." -ForegroundColor Cyan
+        $PreviousGitLfsSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+        $env:GIT_LFS_SKIP_SMUDGE = '1'
         Push-Location $CloneRoot
         git clone --no-hardlinks $SourcePath . 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
+            if ($null -ne $PreviousGitLfsSkipSmudge) {
+                $env:GIT_LFS_SKIP_SMUDGE = $PreviousGitLfsSkipSmudge
+            } else {
+                Remove-Item env:GIT_LFS_SKIP_SMUDGE -ErrorAction SilentlyContinue
+            }
             throw "git clone from $SourcePath failed with exit code $LASTEXITCODE"
+        }
+        if ($null -ne $PreviousGitLfsSkipSmudge) {
+            $env:GIT_LFS_SKIP_SMUDGE = $PreviousGitLfsSkipSmudge
+        } else {
+            Remove-Item env:GIT_LFS_SKIP_SMUDGE -ErrorAction SilentlyContinue
         }
         git remote set-url origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
         git config --local user.name $UserInfo.name
@@ -1182,6 +1194,7 @@ function New-QueClone {
         git config --local lfs.locksverify false
         git config --local push.autoSetupRemote true
         Pop-Location
+        Write-Host "Clone complete. LFS pointer files created (objects will sync via SyncThing)" -ForegroundColor Yellow
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
     } elseif ($ShouldClone) {
         Write-Host "Cloning $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
@@ -1270,8 +1283,12 @@ function New-QueClone {
 # ----------------------------------------------------------------------------
 # Que Git Workflow Helpers
 # ----------------------------------------------------------------------------
-$script:QueMainBranch = "main"
-$script:QueDefaultPublishTag = "lkg"
+if (-not $script:QueMainBranch) {
+    $script:QueMainBranch = "main"
+}
+if (-not $script:QueDefaultPublishTag) {
+    $script:QueDefaultPublishTag = "lkg"
+}
 
 function Get-QueCloneNameFromPath {
     param([string]$CloneRoot)
@@ -1279,36 +1296,42 @@ function Get-QueCloneNameFromPath {
 }
 
 function Invoke-QueGit {
-    param([string]$WorkingDir, [string[]]$Args, [switch]$AllowFailure)
+    param([string]$WorkingDir, [string[]]$GitArgs, [switch]$AllowFailure)
     if (-not (Test-Path $WorkingDir)) {
         throw "Working directory not found: $WorkingDir"
     }
+    # Filter out null or empty arguments
+    $FilteredArgs = @($GitArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($FilteredArgs.Count -eq 0) {
+        $CallStack = Get-PSCallStack | ForEach-Object { "  at $($_.Command) in $($_.ScriptName):$($_.ScriptLineNumber)" }
+        throw "No git command specified (GitArgs was empty or contained only null/whitespace values)`nOriginal GitArgs count: $($GitArgs.Count), GitArgs: [$($GitArgs -join ', ')]`nCall stack:`n$($CallStack -join "`n")"
+    }
     Push-Location $WorkingDir
     try {
-        $Output = & git @Args 2>&1
+        $Output = & git @FilteredArgs 2>&1
         $ExitCode = $LASTEXITCODE
     } finally {
         Pop-Location
     }
     if (-not $AllowFailure -and $ExitCode -ne 0) {
-        throw "git $($Args -join ' ') failed with exit code $ExitCode`n$($Output -join "`n")"
+        throw "git $($FilteredArgs -join ' ') failed with exit code $ExitCode`n$($Output -join "`n")"
     }
     return [pscustomobject]@{
         ExitCode = $ExitCode
         Output = @($Output)
-        Command = $Args -join ' '
+        Command = $FilteredArgs -join ' '
     }
 }
 
 function Get-QueCurrentBranch {
     param([string]$CloneRoot)
-    $Result = Invoke-QueGit -WorkingDir $CloneRoot -Args @("rev-parse", "--abbrev-ref", "HEAD")
+    $Result = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--abbrev-ref", "HEAD")
     return ($Result.Output | Select-Object -First 1)
 }
 
 function Invoke-QueMerge {
     param([string]$CloneRoot, [string]$Source, [string]$Message)
-    $MergeResult = Invoke-QueGit -WorkingDir $CloneRoot -Args @("merge", "--no-ff", $Source, "-m", $Message) -AllowFailure
+    $MergeResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("merge", "--no-ff", $Source, "-m", $Message) -AllowFailure
     if ($MergeResult.ExitCode -ne 0) {
         throw "Merge from $Source resulted in conflicts. Resolve them, commit, and rerun the command.`n$($MergeResult.Output -join "`n")"
     }
@@ -1319,7 +1342,7 @@ function Invoke-QuePushWithRetry {
     param([string]$CloneRoot, [string]$Branch, [int]$MaxAttempts = 3)
     $DelaySeconds = 2
     for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
-        $PushResult = Invoke-QueGit -WorkingDir $CloneRoot -Args @("push", "-u", "origin", $Branch) -AllowFailure
+        $PushResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "-u", "origin", $Branch) -AllowFailure
         if ($PushResult.ExitCode -eq 0) {
             return $PushResult
         }
@@ -1327,7 +1350,7 @@ function Invoke-QuePushWithRetry {
             throw "Push failed after $MaxAttempts attempts.`n$($PushResult.Output -join "`n")"
         }
         Write-Host "Push rejected; merging origin/$($script:QueMainBranch) then retrying (attempt $($Attempt + 1) of $MaxAttempts)..." -ForegroundColor Yellow
-        Invoke-QueGit -WorkingDir $CloneRoot -Args @("fetch", "origin", $script:QueMainBranch)
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch)
         Invoke-QueMerge -CloneRoot $CloneRoot -Source ("origin/{0}" -f $script:QueMainBranch) -Message ("que: merge origin/{0}" -f $script:QueMainBranch)
         Start-Sleep -Seconds $DelaySeconds
         $DelaySeconds = [Math]::Min($DelaySeconds * 2, 30)
@@ -1337,7 +1360,7 @@ function Invoke-QuePushWithRetry {
 function Invoke-QueStashAll {
     param([string]$CloneRoot, [string]$Reason)
     $Message = "que: $Reason"
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("stash", "push", "-u", "-m", $Message) -AllowFailure | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("stash", "push", "-u", "-m", $Message) -AllowFailure | Out-Null
 }
 
 function Invoke-QueSaveCommand {
@@ -1346,20 +1369,20 @@ function Invoke-QueSaveCommand {
     $CurrentBranch = Get-QueCurrentBranch -CloneRoot $CloneRoot
     if ($CurrentBranch -eq $script:QueMainBranch) {
         $WorkBranch = "que/$CloneName"
-        $Existing = Invoke-QueGit -WorkingDir $CloneRoot -Args @("show-ref", "--verify", "refs/heads/$WorkBranch") -AllowFailure
+        $Existing = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/heads/$WorkBranch") -AllowFailure
         if ($Existing.ExitCode -eq 0) {
-            Invoke-QueGit -WorkingDir $CloneRoot -Args @("switch", $WorkBranch) | Out-Null
+            Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $WorkBranch) | Out-Null
         } else {
-            Invoke-QueGit -WorkingDir $CloneRoot -Args @("switch", "-c", $WorkBranch) | Out-Null
+            Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", "-c", $WorkBranch) | Out-Null
         }
         $CurrentBranch = $WorkBranch
     }
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("add", "-A") | Out-Null
-    $Status = Invoke-QueGit -WorkingDir $CloneRoot -Args @("status", "--porcelain") -AllowFailure
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("add", "-A") | Out-Null
+    $Status = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("status", "--porcelain") -AllowFailure
     $HasChanges = $Status.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     if ($HasChanges) {
         $CommitMessage = "que: save $CloneName"
-        $CommitResult = Invoke-QueGit -WorkingDir $CloneRoot -Args @("commit", "-m", $CommitMessage) -AllowFailure
+        $CommitResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("commit", "-m", $CommitMessage) -AllowFailure
         if ($CommitResult.ExitCode -ne 0 -and -not ($CommitResult.Output -join ' ' -match 'nothing to commit')) {
             throw "Commit failed: $($CommitResult.Output -join "`n")"
         }
@@ -1374,16 +1397,16 @@ function Invoke-QueOpenBranchCommand {
     param([string]$CloneRoot, [string]$Name)
     if (-not $Name) { throw "Branch name is required for 'que open'." }
     $BranchName = "que/$Name"
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("fetch", "origin", $BranchName) | Out-Null
-    $RemoteCheck = Invoke-QueGit -WorkingDir $CloneRoot -Args @("show-ref", "--verify", "refs/remotes/origin/$BranchName") -AllowFailure
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $BranchName) | Out-Null
+    $RemoteCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/remotes/origin/$BranchName") -AllowFailure
     if ($RemoteCheck.ExitCode -ne 0) {
         throw "Work branch $BranchName does not exist on origin."
     }
-    $LocalCheck = Invoke-QueGit -WorkingDir $CloneRoot -Args @("show-ref", "--verify", "refs/heads/$BranchName") -AllowFailure
+    $LocalCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/heads/$BranchName") -AllowFailure
     if ($LocalCheck.ExitCode -eq 0) {
-        Invoke-QueGit -WorkingDir $CloneRoot -Args @("switch", $BranchName) | Out-Null
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $BranchName) | Out-Null
     } else {
-        Invoke-QueGit -WorkingDir $CloneRoot -Args @("switch", "-c", $BranchName, "--track", "origin/$BranchName") | Out-Null
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", "-c", $BranchName, "--track", "origin/$BranchName") | Out-Null
     }
     Write-Host "Switched to $BranchName" -ForegroundColor Green
 }
@@ -1396,8 +1419,8 @@ function Invoke-QueImportCommand {
         $CurrentBranch = Invoke-QueSaveCommand -CloneRoot $CloneRoot
     }
     $SourceBranch = "que/$Name"
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("fetch", "origin", $SourceBranch) | Out-Null
-    $RemoteCheck = Invoke-QueGit -WorkingDir $CloneRoot -Args @("show-ref", "--verify", "refs/remotes/origin/$SourceBranch") -AllowFailure
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $SourceBranch) | Out-Null
+    $RemoteCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/remotes/origin/$SourceBranch") -AllowFailure
     if ($RemoteCheck.ExitCode -ne 0) {
         throw "Work branch $SourceBranch not found on origin."
     }
@@ -1409,9 +1432,9 @@ function Invoke-QueUpdateCommand {
     param([string]$CloneRoot)
     $CurrentBranch = Get-QueCurrentBranch -CloneRoot $CloneRoot
     if ($CurrentBranch -eq $script:QueMainBranch) {
-        Invoke-QueGit -WorkingDir $CloneRoot -Args @("pull", "--no-rebase", "origin", $script:QueMainBranch) | Out-Null
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("pull", "--no-rebase", "origin", $script:QueMainBranch) | Out-Null
     } else {
-        Invoke-QueGit -WorkingDir $CloneRoot -Args @("fetch", "origin", $script:QueMainBranch) | Out-Null
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch) | Out-Null
         Invoke-QueMerge -CloneRoot $CloneRoot -Source ("origin/$($script:QueMainBranch)") -Message ("que: merge origin/{0}" -f $script:QueMainBranch) | Out-Null
     }
     return $CurrentBranch
@@ -1430,22 +1453,22 @@ function Invoke-QueRenameCommand {
         return $NewBranch
     }
     $OldBranch = $CurrentBranch
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("branch", "-m", $NewBranch) | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("branch", "-m", $NewBranch) | Out-Null
     Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $NewBranch | Out-Null
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("push", "origin", ":$OldBranch") -AllowFailure | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "origin", ":$OldBranch") -AllowFailure | Out-Null
     Write-Host "Renamed $OldBranch to $NewBranch locally and on origin." -ForegroundColor Green
     return $NewBranch
 }
 
 function Invoke-QueResetCommand {
     param([string]$CloneRoot)
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("rebase", "--abort") -AllowFailure | Out-Null
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("merge", "--abort") -AllowFailure | Out-Null
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("cherry-pick", "--abort") -AllowFailure | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rebase", "--abort") -AllowFailure | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("merge", "--abort") -AllowFailure | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("cherry-pick", "--abort") -AllowFailure | Out-Null
     Invoke-QueStashAll -CloneRoot $CloneRoot -Reason "reset"
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("switch", $script:QueMainBranch) | Out-Null
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("fetch", "origin", $script:QueMainBranch) | Out-Null
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("reset", "--hard", "origin/$($script:QueMainBranch)") | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $script:QueMainBranch) | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch) | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("reset", "--hard", "origin/$($script:QueMainBranch)") | Out-Null
     Write-Host "Reset to origin/$($script:QueMainBranch). Local changes stashed." -ForegroundColor Green
 }
 
@@ -1459,13 +1482,13 @@ function Invoke-QuePublishCommand {
     } else {
         $WorkBranch = $CurrentBranch
     }
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("switch", $script:QueMainBranch) | Out-Null
-    Invoke-QueGit -WorkingDir $CloneRoot -Args @("pull", "--no-rebase", "origin", $script:QueMainBranch) | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $script:QueMainBranch) | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("pull", "--no-rebase", "origin", $script:QueMainBranch) | Out-Null
     Invoke-QueMerge -CloneRoot $CloneRoot -Source $WorkBranch -Message ("que: publish {0}" -f $WorkBranch) | Out-Null
     Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $script:QueMainBranch | Out-Null
     if ($TagName) {
-        Invoke-QueGit -WorkingDir $CloneRoot -Args @("tag", "-f", $TagName) | Out-Null
-        Invoke-QueGit -WorkingDir $CloneRoot -Args @("push", "-f", "origin", $TagName) | Out-Null
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("tag", "-f", $TagName) | Out-Null
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "-f", "origin", $TagName) | Out-Null
         Write-Host "Moved tag $TagName to $script:QueMainBranch and pushed." -ForegroundColor Green
     }
     return $WorkBranch
@@ -2053,3 +2076,4 @@ $IsDotSourced = $MyInvocation.InvocationName -eq '.'
 if (-not $IsDotSourced) {
     Invoke-QueMain
 }
+
