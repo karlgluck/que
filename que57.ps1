@@ -491,7 +491,7 @@ function Install-NetFx3WithElevation {
             try {
                 Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null
                 Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
-                Sleep 5
+                Start-Sleep 5
                 exit 0
             } catch {
                 Write-Error "Failed to enable NetFx3: $($_.Exception.Message)"
