@@ -633,6 +633,28 @@ function Get-SyncThingExecutable {
     return $null
 }
 
+function Invoke-SyncThingCli {
+    # Runs Syncthing CLI with common args
+    param(
+        [string]$SyncThingExe,
+        [string]$SyncThingHome,
+        [string]$GuiAddress,
+        [string]$ApiKey,
+        [string[]]$Args,
+        [switch]$QuietErrors
+    )
+    $BaseArgs = @(
+        "cli"
+        "--home=$SyncThingHome"
+        "--gui-address=$GuiAddress"
+        "--gui-apikey=$ApiKey"
+    )
+    if ($QuietErrors) {
+        return & $SyncThingExe @BaseArgs @Args 2>$null
+    }
+    return & $SyncThingExe @BaseArgs @Args
+}
+
 function Ensure-SyncThingRunning {
     # Ensures SyncThing is running, starts it if needed. Returns device ID and GUI address info.
     param([string]$WorkspaceRoot)
@@ -701,7 +723,7 @@ function Ensure-SyncThingRunning {
         $Port | Set-Content $PortFile
         Write-Host "Generated and stored new SyncThing port: $Port" -ForegroundColor Green
     }
-    $RawAddress = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config gui raw-address get 2>$null
+    $RawAddress = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @("config", "gui", "raw-address", "get") -QuietErrors
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Starting SyncThing at $GuiAddress..." -ForegroundColor Cyan
         $StartArgs = @(
@@ -724,7 +746,7 @@ function Ensure-SyncThingRunning {
     } else {
         Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
     }
-    $DeviceIdList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>$null
+    $DeviceIdList = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @("config", "devices", "list") -QuietErrors
     $DeviceId = $DeviceIdList | Select-Object -First 1
     if (-not $DeviceId) {
         Write-Warning "Could not retrieve device ID"
@@ -765,11 +787,7 @@ function Configure-SyncThingFolders {
     $LfsFolderId = "$GitHubRepo-lfs"
     $LfsLabel = "$GitHubRepo Git LFS"
     Write-Host "Configuring SyncThing folder: $LfsLabel" -ForegroundColor Cyan
-    $CliArgs = @(
-        "cli"
-        "--home=$SyncThingHome"
-        "--gui-address=$GuiAddress"
-        "--gui-apikey=$ApiKey"
+    Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
         "config"
         "folders"
         "add"
@@ -778,17 +796,12 @@ function Configure-SyncThingFolders {
         "--path=$LfsPath"
         "--ignore-delete"
     )
-    & $SyncThingExe @CliArgs
     # Add depot folder (bidirectional)
     $DepotPath = Join-Path $WorkspaceRoot "sync\depot"
     $DepotFolderId = "$GitHubRepo-depot"
     $DepotLabel = "$GitHubRepo Depot"
     Write-Host "Configuring SyncThing folder: $DepotLabel" -ForegroundColor Cyan
-    $CliArgs = @(
-        "cli"
-        "--home=$SyncThingHome"
-        "--gui-address=$GuiAddress"
-        "--gui-apikey=$ApiKey"
+    Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
         "config"
         "folders"
         "add"
@@ -796,7 +809,6 @@ function Configure-SyncThingFolders {
         "--label=$DepotLabel"
         "--path=$DepotPath"
     )
-    & $SyncThingExe @CliArgs
     Write-Host "SyncThing folders configured successfully" -ForegroundColor Green
 }
 
@@ -818,50 +830,35 @@ function Update-SyncThingDevices {
     $ApiKey = $SyncThingInfo.ApiKey
     $LfsFolderId = "$GitHubRepo-lfs"
     $DepotFolderId = "$GitHubRepo-depot"
-    $AllKnownDeviceIds = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config devices list 2>$null
+    $AllKnownDeviceIds = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @("config", "devices", "list") -QuietErrors
     foreach ($DeviceId in $DeviceIds) {
         if ($DeviceId -and $AllKnownDeviceIds -notcontains $DeviceId) {
             Write-Host "Adding SyncThing peer: $DeviceId" -ForegroundColor Green
-            $CliArgs = @(
-                "cli"
-                "--home=$SyncThingHome"
-                "--gui-address=$GuiAddress"
-                "--gui-apikey=$ApiKey"
+            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
                 "config"
                 "devices"
                 "add"
                 "--device-id=$DeviceId"
                 "--auto-accept-folders"
             )
-            & $SyncThingExe @CliArgs
             Write-Host "  Sharing git-lfs folder with peer" -ForegroundColor Cyan
-            $CliArgs = @(
-                "cli"
-                "--home=$SyncThingHome"
-                "--gui-address=$GuiAddress"
-                "--gui-apikey=$ApiKey"
+            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
                 "config"
                 "folders"
                 $LfsFolderId
                 "devices"
                 "add"
                 "--device-id=$DeviceId"
-            )
-            & $SyncThingExe @CliArgs 2>$null
+            ) -QuietErrors
             Write-Host "  Sharing depot folder with peer" -ForegroundColor Cyan
-            $CliArgs = @(
-                "cli"
-                "--home=$SyncThingHome"
-                "--gui-address=$GuiAddress"
-                "--gui-apikey=$ApiKey"
+            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
                 "config"
                 "folders"
                 $DepotFolderId
                 "devices"
                 "add"
                 "--device-id=$DeviceId"
-            )
-            & $SyncThingExe @CliArgs 2>$null
+            ) -QuietErrors
         } else {
             Write-Host "Device $DeviceId already configured, skipping" -ForegroundColor Gray
         }
