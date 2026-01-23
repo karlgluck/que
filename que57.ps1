@@ -15,7 +15,7 @@
 # ----------------------------------------------------------------------------
 ###QUE_CONSTANTS_BEGIN###
 $UnrealEngineVersion = "5.7"
-# (Other constants will be dynamically substituted during que-repo-name.ps1 generation)
+# (Other constants will be dynamically substituted)
 ###QUE_CONSTANTS_END###
 
 # ----------------------------------------------------------------------------
@@ -230,10 +230,10 @@ QUE is a single-file PowerShell solution for managing Unreal Engine projects wit
 ###QUE_EMBEDDED_FILES_END###
 
 # ----------------------------------------------------------------------------
-# SYNCTHING DEVICES (only in que-repo-name.ps1)
+# SYNCTHING DEVICES (only in que57-project.ps1)
 # ----------------------------------------------------------------------------
 ###QUE_SYNCTHING_BEGIN###
-# $SyncThingDevices = @()  # Embedded in que-repo-name.ps1 only (array of device IDs)
+# $SyncThingDevices = @()  # Embedded in que57-project.ps1 only (array of device IDs)
 ###QUE_SYNCTHING_END###
 
 # ----------------------------------------------------------------------------
@@ -953,7 +953,7 @@ function Install-AllDependencies {
 }
 
 function New-QueRepoScript {
-    # Generates project-specific que-repo-name.ps1 script with marker-based substitution
+    # Generates project-specific que57-project.ps1 script with marker-based substitution
     param([string]$CloneRoot, [string]$Owner, [string]$Repo, [string]$SyncThingDeviceId = "")
     $ThreeHashes = '###'
     $OutputPath = "$CloneRoot\que57-project.ps1"
@@ -1233,7 +1233,7 @@ function New-QueClone {
 }
 
 # ----------------------------------------------------------------------------
-# MANAGEMENT COMMANDS (commented out in que57.ps1, active in que-repo-name.ps1)
+# MANAGEMENT COMMANDS (commented out in que57.ps1, active in que57-project.ps1)
 # ----------------------------------------------------------------------------
 <####QUE_MANAGEMENT_MODE_BEGIN###
 
