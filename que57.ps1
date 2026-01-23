@@ -165,7 +165,7 @@ To set up your development environment and join this project:
 3. Run this command in PowerShell:
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -useb -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que-{{REPO}}.ps1")).Content)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -useb -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que57-project.ps1")).Content)
 ```
 
 3. Follow the prompts to:
@@ -193,7 +193,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 
 ## Management Commands
 
-Once your workspace is set up, launch the management terminal using `que-{{REPO}}.ps1`:
+Once your workspace is set up, launch the management terminal using `que57-project.ps1`:
 
 - **open** - Generate project files, build, and launch UE editor
 - **build** - Build the editor target
@@ -211,11 +211,11 @@ workspace-root/
 |   +-- depot/               # Shared asset depot
 +-- env/                     # Environment data (PAT, SyncThing)
 +-- repo/                    # Repository clones
-    +-- YYYY-MM-DD-A/        # Clone directory
-        +-- que-{{REPO}}.ps1 # Project management script
+    +-- kauilani/            # Clone directory (random name)
+        +-- que57-project.ps1 # Project management script
 ```
 
-**Clone Naming:** Each time you create a new clone, it's named with today's date plus a letter suffix (A-Z, then Z1, Z2, etc.). This lets you maintain multiple working copies simultaneously.
+**Clone Naming:** Each clone gets a unique Hawaiian-sounding name (e.g., Kauilani, Mahalo, Wakena) to make the randomness more pleasant and easily recognized.
 
 ## How It Works
 
@@ -335,26 +335,74 @@ function Test-GitHubPAT {
 }
 
 function Get-NextCloneName {
-    # Generates next clone directory name: YYYY-MM-DD-A, -B, ..., -Z, -Z1, -Z2, ...
+    # Generates a unique Hawaiian-sounding clone directory name
     param([string]$WorkspaceRoot)
-    $Today = Get-Date -Format "yyyy-MM-dd"
     $RepoDir = Join-Path $WorkspaceRoot "repo"
-    if (-not (Test-Path $RepoDir)) { return "$Today-A" }
-    $ExistingClones = Get-ChildItem $RepoDir -Directory |
-        Where-Object { $_.Name -match "^$Today-(.+)$" } |
-        ForEach-Object { $matches[1] } |
-        Sort-Object
-    if (-not $ExistingClones) { return "$Today-A" }
-    $LastSuffix = $ExistingClones[-1]
-    if ($LastSuffix -match '^[A-Y]$') {
-        return "$Today-$([char]([int][char]$LastSuffix + 1))"
+    $ExistingNames = @()
+    if (Test-Path $RepoDir) {
+        $ExistingNames = @(Get-ChildItem $RepoDir -Directory | ForEach-Object { $_.Name.ToLower() })
     }
-    if ($LastSuffix -eq 'Z') { return "$Today-Z1" }
-    if ($LastSuffix -match '^Z(\d+)$') {
-        $Number = [int]$matches[1] + 1
-        return "$Today-Z$Number"
+    # Hawaiian phoneme sets
+    [string[]]$Vowels = @('a','e','i','o','u')
+    [string[]]$Consonants = @('h','k','l','m','n','p','w')
+    [string[]]$Onsets = @(
+        '', 'h','k','l','m','n','p','w',
+        'ha','he','hi','ho','hu',
+        'ka','ke','ki','ko','ku',
+        'la','le','li','lo','lu',
+        'ma','me','mi','mo','mu',
+        'na','ne','ni','no','nu',
+        'pa','pe','pi','po','pu',
+        'wa','we','wi','wo','wu'
+    )
+    [string[]]$Diphthongs = @('ai','ae','ao','au','ei','eu','oi','ou','ia','io','iu')
+    # Generate unique names until we find one that doesn't exist
+    $MaxAttempts = 100
+    for ($Attempt = 0; $Attempt -lt $MaxAttempts; $Attempt++) {
+        $Length = Get-Random -Minimum 5 -Maximum 11
+        $Syllables = @()
+        $CurrentLength = 0
+        while ($CurrentLength -lt $Length) {
+            if ($Syllables.Count -eq 0) {
+                # First syllable - can start with vowel or consonant
+                if ((Get-Random -Maximum 10) -lt 4) {
+                    $Syl = $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                } else {
+                    $Syl = $Onsets[(Get-Random -Maximum $Onsets.Count)]
+                    if ($Syl -eq '') { $Syl = $Vowels[(Get-Random -Maximum $Vowels.Count)] }
+                }
+            } else {
+                # Subsequent syllables
+                if ((Get-Random -Maximum 10) -lt 5) {
+                    if ((Get-Random -Maximum 10) -lt 6) {
+                        $Syl = $Diphthongs[(Get-Random -Maximum $Diphthongs.Count)]
+                    } else {
+                        $Syl = $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                    }
+                } else {
+                    $C = $Consonants[(Get-Random -Maximum $Consonants.Count)]
+                    $V = $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                    $Syl = $C + $V
+                }
+            }
+            if (($CurrentLength + $Syl.Length) -le $Length + 2) {
+                $Syllables += $Syl
+                $CurrentLength += $Syl.Length
+            } else {
+                if ($CurrentLength -lt $Length) {
+                    $Syllables += $Vowels[(Get-Random -Maximum $Vowels.Count)]
+                    $CurrentLength += 1
+                }
+                break
+            }
+        }
+        $Word = ($Syllables -join '').Trim()
+        if ($Word -and ($Word.ToLower() -notin $ExistingNames)) {
+            return $Word
+        }
     }
-    throw "Unable to generate next clone name from: $LastSuffix"
+    # Fallback: append timestamp if all attempts fail
+    return "Clone-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 }
 
 function Find-UProjectFile {
@@ -662,6 +710,7 @@ function Ensure-SyncThingRunning {
             "--gui-apikey=$ApiKey"
             "--unpaused"
             "--no-upgrade"
+            "--no-browser"
         )
         Write-Host "$StartArgs"
         $StartProcessArgs = @{
@@ -907,7 +956,7 @@ function New-QueRepoScript {
     # Generates project-specific que-repo-name.ps1 script with marker-based substitution
     param([string]$CloneRoot, [string]$Owner, [string]$Repo, [string]$SyncThingDeviceId = "")
     $ThreeHashes = '###'
-    $OutputPath = "$CloneRoot\que-$Repo.ps1"
+    $OutputPath = "$CloneRoot\que57-project.ps1"
     $ScriptContent = $queScript
     # Update constants section
     $ConstantsBlock = @"
@@ -1147,7 +1196,7 @@ function New-QueClone {
         Write-GitConfigFiles -CloneRoot $CloneRoot
         $ReadmeContent = $EmbeddedReadme -replace '{{OWNER}}', $GitHubOwner -replace '{{REPO}}', $GitHubRepo
         Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
-        Write-Host "Generating que-$GitHubRepo.ps1..." -ForegroundColor Cyan
+        Write-Host "Generating que57-project.ps1..." -ForegroundColor Cyan
         $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
         New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
         Push-Location $CloneRoot
@@ -1176,7 +1225,7 @@ function New-QueClone {
     git config --local lfs.storage $LfsStoragePath
     Pop-Location
     $ShortcutPath = "$WorkspaceRoot\open-$CloneName.lnk"
-    $TargetScript = "$CloneRoot\que-$GitHubRepo.ps1"
+    $TargetScript = "$CloneRoot\que57-project.ps1"
     New-WindowsShortcut -ShortcutPath $ShortcutPath -TargetScript $TargetScript
     Write-Host "Created shortcut: $ShortcutPath" -ForegroundColor Green
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"
@@ -1370,6 +1419,7 @@ function Invoke-UnrealPackage {
 }
 
 function Open-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nOpening Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1404,6 +1454,7 @@ function Open-UnrealProject {
 }
 
 function Build-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nBuilding Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1431,6 +1482,7 @@ function Build-UnrealProject {
 }
 
 function Clean-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nCleaning Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1445,6 +1497,7 @@ function Clean-UnrealProject {
 }
 
 function Package-UnrealProject {
+    param([string]$CloneRoot)
     Write-Host "`nPackaging Unreal Engine project..." -ForegroundColor Cyan
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
@@ -1468,6 +1521,7 @@ function Package-UnrealProject {
 }
 
 function Open-SyncThingBrowser {
+    param([string]$WorkspaceRoot)
     $SyncThingHome = "$WorkspaceRoot\.que\syncthing"
     $SyncThingExe = Get-SyncThingExecutable
     if (-not $SyncThingExe) {
@@ -1478,6 +1532,8 @@ function Open-SyncThingBrowser {
 }
 
 function Show-WorkspaceInfo {
+    param([string]$WorkspaceRoot, [string]$CloneRoot)
+    $CloneName = Split-Path $CloneRoot -Leaf
     Write-Host "`n===============================================================" -ForegroundColor Cyan
     Write-Host "  QUE Workspace Information" -ForegroundColor Green
     Write-Host "===============================================================" -ForegroundColor Cyan
@@ -1490,7 +1546,7 @@ function Show-WorkspaceInfo {
     $RepoVersion = Get-Content "$WorkspaceRoot\.que\repo\$CloneName\repo-version" -ErrorAction SilentlyContinue
     Write-Host "  Version: $(if ($RepoVersion) { $RepoVersion } else { 'Not set' })"
     Write-Host "`nGitHub:" -ForegroundColor Yellow
-    Write-Host "  Repository: $GitHubOwner/$GitHubRepo"
+    Write-Host "  Repository: $script:GitHubOwner/$script:GitHubRepo"
     Push-Location $CloneRoot
     $GitUser = git config user.name
     if ($LASTEXITCODE -eq 0) {
@@ -1509,7 +1565,7 @@ function Show-WorkspaceInfo {
     if ($UProjectPath) {
         Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
         Write-Host "  Project: $UProjectPath"
-        Write-Host "  Version: $UnrealEngineVersion"
+        Write-Host "  Version: $script:UnrealEngineVersion"
     } else {
         Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
         Write-Host "  No .uproject file found"
@@ -1678,7 +1734,7 @@ function Invoke-QueMain {
             $CloneName = Split-Path $CloneRoot -Leaf
             Write-UEGitConfigFiles -CloneRoot $CloneRoot
             Write-Host "`n===============================================================" -ForegroundColor Cyan
-            Write-Host "  QUE - $GitHubOwner/$GitHubRepo" -ForegroundColor Green
+            Write-Host "  QUE - $script:GitHubOwner/$script:GitHubRepo" -ForegroundColor Green
             Write-Host "  Clone: $CloneName" -ForegroundColor Yellow
             Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
             Write-Host "===============================================================`n" -ForegroundColor Cyan
@@ -1687,12 +1743,12 @@ function Invoke-QueMain {
                 Write-Host "open, build, clean, package, syncthing, info, exit" -ForegroundColor Gray
                 $Command = Read-Host "`nQUE>"
                 switch ($Command.ToLower()) {
-                    "open"      { Open-UnrealProject }
-                    "build"     { Build-UnrealProject }
-                    "clean"     { Clean-UnrealProject }
-                    "package"   { Package-UnrealProject }
-                    "syncthing" { Open-SyncThingBrowser }
-                    "info"      { Show-WorkspaceInfo }
+                    "open"      { Open-UnrealProject -CloneRoot $CloneRoot }
+                    "build"     { Build-UnrealProject -CloneRoot $CloneRoot }
+                    "clean"     { Clean-UnrealProject -CloneRoot $CloneRoot }
+                    "package"   { Package-UnrealProject -CloneRoot $CloneRoot }
+                    "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $WorkspaceRoot }
+                    "info"      { Show-WorkspaceInfo -WorkspaceRoot $WorkspaceRoot -CloneRoot $CloneRoot }
                     "exit"      { return }
                     ""        { continue }
                     default   { Write-Host "Unknown command: $Command" -ForegroundColor Red }

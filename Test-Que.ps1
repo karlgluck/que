@@ -7,20 +7,6 @@
     golden path workflow including GitHub repository creation, workspace initialization,
     SyncThing synchronization, and Git LFS operations.
 
-    IMPLEMENTATION STATUS:
-    ✓ Phase 0: Script structure and parameters
-    ✓ Phase 1: Pre-flight checks (PowerShell, Git, Git LFS, GitHub token validation)
-    ✓ Phase 2: Test environment setup (temp directory creation)
-    ✓ Phase 3: First workspace creation (via dot-sourcing que57.ps1 functions)
-    ✓ Phase 4: Second workspace using generated script (with namespace management)
-    ✓ Phase 5: Git LFS commit test (using .uasset file)
-    ✓ Phase 6: SyncThing peer auto-addition test (launches .lnk files, commits/pulls device IDs)
-    ✓ Phase 7: SyncThing depot synchronization test (creates file, waits for sync, validates contents)
-    ✓ Phase 8: Git pull LFS validation (waits for LFS cache sync, pulls, validates checkout)
-    ✓ Phase 9: Multiple clones test (creates second clone in workspace 1, validates structure)
-    ✓ Phase 10: Summary and reporting
-    ✓ Phase 11: Cleanup with user prompts
-
     CURRENT CAPABILITIES:
     - Validates environment (PowerShell, Git, Git LFS, SyncThing)
     - Checks GitHub token validity and permissions
@@ -54,7 +40,12 @@
 
 .PARAMETER GitHubToken
     GitHub Personal Access Token with repo creation permissions. If not provided,
-    the script will prompt securely.
+    the script will check the QUE_TEST_GITHUB_PAT environment variable, or prompt
+    securely and save the token to that session variable for this PowerShell session.
+
+.PARAMETER AutoApprove
+    Run in non-interactive mode; automatically answer all prompts and clean up every artifact,
+    including the remote GitHub repository.
 
 .PARAMETER KeepArtifacts
     Skip cleanup prompts and keep all test artifacts for inspection.
@@ -76,6 +67,11 @@
     .\Test-Que.ps1 -KeepArtifacts
 
     Runs tests and keeps all artifacts without prompting for cleanup.
+
+.EXAMPLE
+    .\Test-Que.ps1 -GitHubToken "ghp_xxxxx" -AutoApprove
+
+    Runs the full test suite without interactive prompts and removes the test artifacts afterward.
 
 .EXAMPLE
     git bisect start
@@ -108,6 +104,9 @@ param(
     [string]$GitHubToken,
 
     [Parameter(Mandatory=$false)]
+    [switch]$AutoApprove,
+
+    [Parameter(Mandatory=$false)]
     [switch]$KeepArtifacts,
 
     [Parameter(Mandatory=$false)]
@@ -125,6 +124,24 @@ $script:TestResults = @{
     SyncThingPIDs = @()
     GitHubRepoName = "test-que-demo-repo"
     GitHubUser = $null
+    TestRootPath = $null
+}
+$script:InitialSyncThingPIDs = @()
+
+$script:NonInteractive = $AutoApprove.IsPresent
+if ($script:NonInteractive) {
+    Write-Host "Non-interactive mode enabled; prompts will be auto-approved." -ForegroundColor Gray
+    $KeepArtifacts = $false
+}
+
+# Preload CIM cmdlets to avoid WhatIf noise from module alias setup.
+$savedWhatIfPreference = $WhatIfPreference
+try {
+    $WhatIfPreference = $false
+    Import-Module CimCmdlets -ErrorAction SilentlyContinue | Out-Null
+}
+finally {
+    $WhatIfPreference = $savedWhatIfPreference
 }
 
 #region Helper Functions
@@ -252,6 +269,11 @@ function Wait-ForUserConfirmation {
     )
 
     Write-Host "`n$Message" -ForegroundColor Yellow
+    if ($script:NonInteractive) {
+        Write-Host "Non-interactive mode: proceeding automatically." -ForegroundColor Gray
+        return $true
+    }
+
     $response = Read-Host "Continue waiting? (y/N)"
 
     return ($response -eq 'y' -or $response -eq 'Y')
@@ -279,6 +301,101 @@ function Get-SyncThingProcessCount {
     }
 
     return $parentProcesses.Count
+}
+
+function Get-SyncThingProcessDetails {
+    <#
+    .SYNOPSIS
+        Gets SyncThing process details including command line when available.
+    #>
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name='syncthing.exe'" -ErrorAction SilentlyContinue)
+    if ($processes.Count -gt 0) {
+        return $processes
+    }
+
+    return @(Get-Process -Name "syncthing" -ErrorAction SilentlyContinue | ForEach-Object {
+        [pscustomobject]@{
+            ProcessId = $_.Id
+            Name = $_.ProcessName
+            CommandLine = $null
+        }
+    })
+}
+
+function Get-TestSyncThingProcessIds {
+    <#
+    .SYNOPSIS
+        Returns SyncThing PIDs that are likely started by this test.
+    #>
+    param(
+        [Parameter(Mandatory=$false)]
+        [string]$TestRootPath,
+
+        [Parameter(Mandatory=$false)]
+        [int[]]$BaselinePids = @()
+    )
+
+    $processes = Get-SyncThingProcessDetails
+    if (-not $processes) {
+        return @()
+    }
+
+    $testPids = @()
+    foreach ($proc in $processes) {
+        $procId = $proc.ProcessId
+        $cmd = $proc.CommandLine
+        $isNew = $BaselinePids -notcontains $procId
+        $isTestPath = $false
+
+        if ($TestRootPath -and $cmd) {
+            $isTestPath = $cmd -like "*$TestRootPath*"
+        }
+
+        if ($isNew -or $isTestPath) {
+            $testPids += $procId
+        }
+    }
+
+    return $testPids | Sort-Object -Unique
+}
+
+function Wait-ForProcessExit {
+    <#
+    .SYNOPSIS
+        Waits for specific process IDs to exit, with timeout.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [int[]]$ProcessIds,
+
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 15,
+
+        [Parameter(Mandatory=$false)]
+        [int]$PollIntervalSeconds = 1
+    )
+
+    if (-not $ProcessIds -or $ProcessIds.Count -eq 0) {
+        return $true
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $remaining = @()
+        foreach ($procId in $ProcessIds) {
+            if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+                $remaining += $procId
+            }
+        }
+
+        if ($remaining.Count -eq 0) {
+            return $true
+        }
+
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+
+    return $false
 }
 
 function Invoke-QueScriptWithInput {
@@ -466,12 +583,27 @@ if (-not $syncthingFound) {
 # Step 1.2: GitHub Token Acquisition
 Write-TestStep "Acquiring GitHub token"
 if (-not $GitHubToken) {
-    Write-Host "GitHub Personal Access Token is required for testing." -ForegroundColor Yellow
-    Write-Host "The token needs 'repo' permissions to create and delete repositories." -ForegroundColor Yellow
-    $secureToken = Read-Host "Enter GitHub PAT" -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
-    $GitHubToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+    # Try to get token from environment variable
+    if ($env:QUE_TEST_GITHUB_PAT) {
+        $GitHubToken = $env:QUE_TEST_GITHUB_PAT
+        Write-Host "Using GitHub PAT from environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Gray
+    }
+    else {
+        if ($script:NonInteractive) {
+            Write-TestFailure "GitHub token must be provided using -GitHubToken or QUE_TEST_GITHUB_PAT when running in non-interactive mode" -ExitCode 3
+        }
+        Write-Host "GitHub Personal Access Token is required for testing." -ForegroundColor Yellow
+        Write-Host "The token needs 'repo' permissions to create and delete repositories." -ForegroundColor Yellow
+        Write-Host "To avoid re-entering the token in this session, it will be saved to environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Yellow
+        $secureToken = Read-Host "Enter GitHub PAT" -AsSecureString
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+        $GitHubToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+
+        # Save to session environment variable for this PowerShell session only
+        $env:QUE_TEST_GITHUB_PAT = $GitHubToken
+        Write-Host "GitHub PAT saved to session environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Green
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
@@ -499,7 +631,13 @@ if ($repoExists) {
 
     if (-not $KeepArtifacts) {
         Write-Host "`nThe test repository needs to be deleted to run this test." -ForegroundColor Yellow
-        $deleteExisting = Read-Host "Delete existing repository '$($script:TestResults.GitHubRepoName)'? (y/N)"
+        if ($script:NonInteractive) {
+            Write-Host "Non-interactive mode: deleting existing repository without prompting." -ForegroundColor Gray
+            $deleteExisting = 'y'
+        }
+        else {
+            $deleteExisting = Read-Host "Delete existing repository '$($script:TestResults.GitHubRepoName)'? (y/N)"
+        }
 
         if ($deleteExisting -eq 'y' -or $deleteExisting -eq 'Y') {
             if ($PSCmdlet.ShouldProcess($script:TestResults.GitHubRepoName, "delete from GitHub")) {
@@ -544,6 +682,9 @@ Write-Host "Pre-flight checks completed successfully" -ForegroundColor Green
 Write-Host "Ready to begin testing..." -ForegroundColor Green
 Write-Host "============================================`n" -ForegroundColor Green
 
+# Capture any SyncThing processes running before tests start.
+$script:InitialSyncThingPIDs = @(Get-Process -Name "syncthing" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+
 #region Phase 2: Test Environment Setup
 
 Write-TestStep "Creating test environment"
@@ -553,6 +694,7 @@ if (-not $TestRootPath) {
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $TestRootPath = Join-Path $env:TEMP "que-test-$timestamp"
 }
+$script:TestResults.TestRootPath = $TestRootPath
 
 if ($PSCmdlet.ShouldProcess($TestRootPath, "create test root directory")) {
     $script:TestRoot = New-Item -ItemType Directory -Path $TestRootPath -Force
@@ -565,7 +707,6 @@ if ($PSCmdlet.ShouldProcess($TestRootPath, "create test root directory")) {
 }
 else {
     Write-Host "WhatIf: Would create test root at $TestRootPath" -ForegroundColor Yellow
-    exit 0
 }
 
 #endregion
@@ -592,11 +733,13 @@ function Get-UserSelectionIndex {
     return 0
 }
 
-# Change to test root for workspace creation
-Push-Location $script:TestRoot
-
+$testRootPushed = $false
 try {
     if ($PSCmdlet.ShouldProcess("first workspace", "create")) {
+        # Change to test root for workspace creation
+        Push-Location $script:TestRoot
+        $testRootPushed = $true
+
         # Create test user info object
         $TestUser = Test-GitHubPAT -PlainPAT $GitHubToken
         if (-not $TestUser) {
@@ -672,7 +815,9 @@ catch {
     Write-TestFailure "Workspace creation failed: $($_.Exception.Message)"
 }
 finally {
-    Pop-Location
+    if ($testRootPushed) {
+        Pop-Location
+    }
 }
 
 #endregion
@@ -689,7 +834,7 @@ try {
             Write-TestFailure "Could not find first clone directory"
         }
 
-        $GeneratedScript = Join-Path $FirstClone.FullName "que-$($script:TestResults.GitHubRepoName).ps1"
+        $GeneratedScript = Join-Path $FirstClone.FullName "que57-project.ps1"
         if (-not (Test-Path $GeneratedScript)) {
             Write-TestFailure "Generated script not found at: $GeneratedScript"
         }
@@ -887,7 +1032,7 @@ try {
         $Workspace2ClonePath = $Workspace2Clone.FullName
         $Workspace2CloneName = $Workspace2Clone.Name
         $Workspace2LnkPath = Join-Path $script:TestResults.Workspace2Path "open-$Workspace2CloneName.lnk"
-        $Workspace2ScriptPath = Join-Path $Workspace2ClonePath "que-$($script:TestResults.GitHubRepoName).ps1"
+        $Workspace2ScriptPath = Join-Path $Workspace2ClonePath "que57-project.ps1"
 
         if (-not (Test-Path $Workspace2LnkPath)) {
             Write-TestFailure "Workspace 2 .lnk file not found at: $Workspace2LnkPath"
@@ -912,7 +1057,7 @@ try {
         Push-Location $Workspace2ClonePath
 
         # Check git status for changes
-        $GitStatus = git status --porcelain "que-$($script:TestResults.GitHubRepoName).ps1" 2>&1
+        $GitStatus = git status --porcelain "que57-project.ps1" 2>&1
 
         if ([string]::IsNullOrWhiteSpace($GitStatus)) {
             Write-Host "WARNING: No changes detected in que script. Device ID may already be registered." -ForegroundColor Yellow
@@ -923,7 +1068,7 @@ try {
         }
 
         # Check git diff to see what changed
-        $GitDiff = git diff "que-$($script:TestResults.GitHubRepoName).ps1" 2>&1
+        $GitDiff = git diff "que57-project.ps1" 2>&1
         if ($GitDiff) {
             Write-Host "`nChanges in que script:" -ForegroundColor Gray
             $GitDiff | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
@@ -937,7 +1082,7 @@ try {
         # Step 6.3: Commit and push the change
         Write-Host "`nStep 6.3: Committing and pushing SyncThing device ID" -ForegroundColor Cyan
 
-        git add "que-$($script:TestResults.GitHubRepoName).ps1"
+        git add "que57-project.ps1"
         if ($LASTEXITCODE -ne 0) {
             # If add fails, it might mean there's nothing to add (already committed)
             Write-Host "Git add returned non-zero. Checking if there are changes to commit..." -ForegroundColor Yellow
@@ -982,7 +1127,7 @@ try {
         Write-TestSuccess "Pulled changes in workspace 1"
 
         # Verify the que script was updated
-        $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que-$($script:TestResults.GitHubRepoName).ps1"
+        $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que57-project.ps1"
         $ScriptContent = Get-Content $Workspace1ScriptPath -Raw
 
         if ($ScriptContent -match '\$SyncThingDevices\s*=\s*@\(') {
@@ -1415,7 +1560,7 @@ try {
             Write-TestFailure "Could not find first workspace clone directory"
         }
 
-        $GeneratedScript = Join-Path $Workspace1Clone.FullName "que-$($script:TestResults.GitHubRepoName).ps1"
+        $GeneratedScript = Join-Path $Workspace1Clone.FullName "que57-project.ps1"
         if (-not (Test-Path $GeneratedScript)) {
             Write-TestFailure "Generated script not found at: $GeneratedScript"
         }
@@ -1596,8 +1741,21 @@ function Show-TestSummary {
         }
     }
 
+    $testRootDisplay = $null
+    if ($script:TestRoot) {
+        $testRootDisplay = $script:TestRoot.FullName
+    }
+    elseif ($script:TestResults.TestRootPath) {
+        $testRootDisplay = $script:TestResults.TestRootPath
+    }
+
     Write-Host ""
-    Write-Host "Test Root: $($script:TestRoot.FullName)"
+    if ($testRootDisplay) {
+        Write-Host "Test Root: $testRootDisplay"
+    }
+    else {
+        Write-Host "Test Root: (not created)"
+    }
     Write-Host "============================================`n" -ForegroundColor Cyan
 }
 
@@ -1610,19 +1768,34 @@ function Invoke-Cleanup {
     Write-Host "CLEANUP" -ForegroundColor Yellow
     Write-Host "============================================`n" -ForegroundColor Yellow
 
-    # Stop SyncThing processes
+    # Stop SyncThing processes started by this test
     $syncProcesses = Get-Process -Name "syncthing" -ErrorAction SilentlyContinue
     if ($syncProcesses) {
         $instanceCount = Get-SyncThingProcessCount
+        $testSyncPids = $script:TestResults.SyncThingPIDs
         Write-Host "Found $instanceCount SyncThing instance(s) running ($($syncProcesses.Count) processes total)" -ForegroundColor Yellow
-        if (-not $KeepArtifacts) {
-            $stopSync = Read-Host "Stop SyncThing processes? (y/N)"
+        if (-not $testSyncPids -or $testSyncPids.Count -eq 0) {
+            Write-Host "No SyncThing processes associated with this test were detected." -ForegroundColor Gray
+        }
+        elseif (-not $KeepArtifacts) {
+            if ($script:NonInteractive) {
+                Write-Host "Non-interactive mode: stopping SyncThing processes without prompting." -ForegroundColor Gray
+                $stopSync = 'y'
+            }
+            else {
+                $stopSync = Read-Host "Stop SyncThing processes started by this test? (y/N)"
+            }
             if ($stopSync -eq 'y' -or $stopSync -eq 'Y') {
-                foreach ($proc in $syncProcesses) {
-                    if ($PSCmdlet.ShouldProcess("SyncThing (PID: $($proc.Id))", "stop process")) {
+                foreach ($procId in $testSyncPids) {
+                    $proc = $syncProcesses | Where-Object { $_.Id -eq $procId } | Select-Object -First 1
+                    if ($proc -and $PSCmdlet.ShouldProcess("SyncThing (PID: $($proc.Id))", "stop process")) {
                         Stop-Process -Id $proc.Id -Force
                         Write-Host "Stopped SyncThing process: $($proc.Id)" -ForegroundColor Green
                     }
+                }
+
+                if (-not (Wait-ForProcessExit -ProcessIds $testSyncPids -TimeoutSeconds 15 -PollIntervalSeconds 1)) {
+                    Write-Host "WARNING: SyncThing processes may still be exiting; cleanup might fail." -ForegroundColor Yellow
                 }
             }
         }
@@ -1632,7 +1805,13 @@ function Invoke-Cleanup {
     if ($script:TestRoot -and (Test-Path $script:TestRoot)) {
         if (-not $KeepArtifacts) {
             Write-Host "`nTest workspace location: $($script:TestRoot.FullName)" -ForegroundColor Cyan
-            $deleteLocal = Read-Host "Delete local test workspace? (y/N)"
+            if ($script:NonInteractive) {
+                Write-Host "Non-interactive mode: deleting local workspace without prompting." -ForegroundColor Gray
+                $deleteLocal = 'y'
+            }
+            else {
+                $deleteLocal = Read-Host "Delete local test workspace? (y/N)"
+            }
             if ($deleteLocal -eq 'y' -or $deleteLocal -eq 'Y') {
                 if ($PSCmdlet.ShouldProcess($script:TestRoot.FullName, "delete directory")) {
                     try {
@@ -1661,7 +1840,13 @@ function Invoke-Cleanup {
     if ($repoExists) {
         if (-not $KeepArtifacts) {
             Write-Host "`nGitHub repository: $repoUrl" -ForegroundColor Cyan
-            $deleteRemote = Read-Host "Delete GitHub repository '$($script:TestResults.GitHubRepoName)'? (y/N)"
+            if ($script:NonInteractive) {
+                Write-Host "Non-interactive mode: deleting GitHub repository without prompting." -ForegroundColor Gray
+                $deleteRemote = 'y'
+            }
+            else {
+                $deleteRemote = Read-Host "Delete GitHub repository '$($script:TestResults.GitHubRepoName)'? (y/N)"
+            }
             if ($deleteRemote -eq 'y' -or $deleteRemote -eq 'Y') {
                 if ($PSCmdlet.ShouldProcess($script:TestResults.GitHubRepoName, "delete from GitHub")) {
                     try {
@@ -1696,6 +1881,11 @@ function Invoke-Cleanup {
 #endregion
 
 # Show summary and cleanup
+$testRootPath = $null
+if ($script:TestRoot) {
+    $testRootPath = $script:TestRoot.FullName
+}
+$script:TestResults.SyncThingPIDs = Get-TestSyncThingProcessIds -TestRootPath $testRootPath -BaselinePids $script:InitialSyncThingPIDs
 Show-TestSummary
 Invoke-Cleanup
 
