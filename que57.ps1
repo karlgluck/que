@@ -2082,6 +2082,28 @@ function Show-WorkspaceInfo {
     }
     Write-Host "`n===============================================================`n" -ForegroundColor Cyan
 }
+
+function Show-QueHelp {
+    param([string]$DefaultPublishTag)
+    Write-Host "`nAvailable commands:" -ForegroundColor Cyan
+    Write-Host "  help                     - Show this help text"
+    Write-Host "  open                     - Generate project files, build, and launch the editor"
+    Write-Host "  build                    - Build the editor target"
+    Write-Host "  clean                    - Remove intermediates for a clean rebuild"
+    Write-Host "  package                  - Package client/server builds"
+    Write-Host "  syncthing                - Open the SyncThing web UI"
+    Write-Host "  info                     - Display workspace and clone info"
+    Write-Host "  new [name]               - Create a new clone from origin/main"
+    Write-Host "  clone [name]             - Duplicate the current clone's state"
+    Write-Host "  save                     - Commit/push current branch (creates que/<clone> if on main)"
+    Write-Host "  load <branch>            - Load branch que/<branch> into a clone (reuses existing if present)"
+    Write-Host "  import <branch>          - Merge origin/que/<branch> into the current branch"
+    Write-Host "  update                   - Merge latest origin/main into the current branch"
+    Write-Host "  rename <branch>          - Rename current work branch to que/<branch>"
+    Write-Host "  reset                    - Stash changes and reset to origin/main"
+    Write-Host "  publish [tag=$DefaultPublishTag] - Publish current work into main and tag it"
+    Write-Host "  exit                     - Close the QUE session`n"
+}
 #>###QUE_MANAGEMENT_MODE_END###
 
 # ----------------------------------------------------------------------------
@@ -2239,45 +2261,39 @@ function Invoke-QueMain {
             Write-Host "===============================================================`n" -ForegroundColor Cyan
             while ($true) {
                 Write-Host "Commands: " -NoNewline -ForegroundColor White
-                Write-Host "open, build, clean, package, syncthing, info, que <cmd>, exit" -ForegroundColor Gray
+                Write-Host "open, build, clean, package, syncthing, info, new, clone, save, load, import, update, rename, reset, publish, help, exit" -ForegroundColor Gray
                 $RawCommand = Read-Host "`nQUE>"
                 $Tokens = $RawCommand.Trim().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
                 if (-not $Tokens -or $Tokens.Count -eq 0) { continue }
                 $Command = $Tokens[0].ToLower()
-                if ($Command -eq "que") {
-                    $SubCommand = if ($Tokens.Count -gt 1) { $Tokens[1].ToLower() } else { "" }
-                    $Arg1 = if ($Tokens.Count -gt 2) { $Tokens[2] } else { $null }
-                    try {
-                        switch ($SubCommand) {
-                            "new"     { Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $Arg1 | Out-Null }
-                            "clone"   { Invoke-QueCloneCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -CloneName $Arg1 | Out-Null }
-                            "save"    { Invoke-QueSaveCommand -CloneRoot $CloneRoot | Out-Null }
-                            "load"    { Invoke-QueLoadCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -Name $Arg1 | Out-Null }
-                            "import"  { Invoke-QueImportCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
-                            "update"  { Invoke-QueUpdateCommand -CloneRoot $CloneRoot | Out-Null }
-                            "rename"  { Invoke-QueRenameCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
-                            "reset"   { Invoke-QueResetCommand -CloneRoot $CloneRoot | Out-Null }
-                            "publish" {
-                                $TagName = if ($Tokens.Count -gt 2) { $Tokens[2] } else { $null }
-                                Invoke-QuePublishCommand -CloneRoot $CloneRoot -TagName $TagName | Out-Null
-                            }
-                            default   { Write-Host "Unknown que command. Available: new, clone, save, load, import, update, rename, reset, publish [tag=$script:QueDefaultPublishTag]" -ForegroundColor Red }
+                $Arg1 = if ($Tokens.Count -gt 1) { $Tokens[1] } else { $null }
+                try {
+                    switch ($Command) {
+                        "open"      { Open-UnrealProject -CloneRoot $CloneRoot }
+                        "build"     { Build-UnrealProject -CloneRoot $CloneRoot }
+                        "clean"     { Clean-UnrealProject -CloneRoot $CloneRoot }
+                        "package"   { Package-UnrealProject -CloneRoot $CloneRoot }
+                        "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $WorkspaceRoot }
+                        "info"      { Show-WorkspaceInfo -WorkspaceRoot $WorkspaceRoot -CloneRoot $CloneRoot }
+                        "new"       { Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $Arg1 | Out-Null }
+                        "clone"     { Invoke-QueCloneCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -CloneName $Arg1 | Out-Null }
+                        "save"      { Invoke-QueSaveCommand -CloneRoot $CloneRoot | Out-Null }
+                        "load"      { Invoke-QueLoadCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -Name $Arg1 | Out-Null }
+                        "import"    { Invoke-QueImportCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
+                        "update"    { Invoke-QueUpdateCommand -CloneRoot $CloneRoot | Out-Null }
+                        "rename"    { Invoke-QueRenameCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
+                        "reset"     { Invoke-QueResetCommand -CloneRoot $CloneRoot | Out-Null }
+                        "publish"   {
+                            $TagName = $Arg1
+                            Invoke-QuePublishCommand -CloneRoot $CloneRoot -TagName $TagName | Out-Null
                         }
-                    } catch {
-                        Write-Host $_.Exception.Message -ForegroundColor Red
+                        "help"      { Show-QueHelp -DefaultPublishTag $script:QueDefaultPublishTag }
+                        "exit"      { return }
+                        ""          { continue }
+                        default     { Write-Host "Unknown command: $RawCommand. Type 'help' for a list of commands." -ForegroundColor Red }
                     }
-                    continue
-                }
-                switch ($Command) {
-                    "open"      { Open-UnrealProject -CloneRoot $CloneRoot }
-                    "build"     { Build-UnrealProject -CloneRoot $CloneRoot }
-                    "clean"     { Clean-UnrealProject -CloneRoot $CloneRoot }
-                    "package"   { Package-UnrealProject -CloneRoot $CloneRoot }
-                    "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $WorkspaceRoot }
-                    "info"      { Show-WorkspaceInfo -WorkspaceRoot $WorkspaceRoot -CloneRoot $CloneRoot }
-                    "exit"      { return }
-                    ""        { continue }
-                    default   { Write-Host "Unknown command: $RawCommand" -ForegroundColor Red }
+                } catch {
+                    Write-Host $_.Exception.Message -ForegroundColor Red
                 }
             }
         }
