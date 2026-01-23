@@ -1218,6 +1218,23 @@ try {
                                 Write-TestSuccess "Multiple devices configured in SyncThing"
                             }
                         }
+
+                        # Verify required folders exist (catches missing CLI args/regressions)
+                        $ExpectedLfsId = "$($script:TestResults.GitHubRepoName)-lfs"
+                        $ExpectedDepotId = "$($script:TestResults.GitHubRepoName)-depot"
+                        $FolderList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config folders list 2>&1
+                        if (-not $FolderList) {
+                            Write-TestFailure "SyncThing folder list is empty; expected $ExpectedLfsId and $ExpectedDepotId"
+                        }
+                        $HasLfs = $FolderList -contains $ExpectedLfsId
+                        $HasDepot = $FolderList -contains $ExpectedDepotId
+                        if (-not $HasLfs) {
+                            Write-TestFailure "SyncThing LFS folder missing from config: $ExpectedLfsId"
+                        }
+                        if (-not $HasDepot) {
+                            Write-TestFailure "SyncThing depot folder missing from config: $ExpectedDepotId"
+                        }
+                        Write-TestSuccess "SyncThing folders present: $ExpectedLfsId, $ExpectedDepotId"
                     }
                 }
             }
@@ -1570,7 +1587,7 @@ try {
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain', 'Invoke-QueGit',
             'Get-QueCurrentBranch', 'Get-QueCloneNameFromPath', 'Invoke-QueMerge',
             'Invoke-QuePushWithRetry', 'Invoke-QueStashAll', 'Invoke-QueSaveCommand',
-            'Invoke-QueOpenBranchCommand', 'Invoke-QueImportCommand', 'Invoke-QueUpdateCommand',
+            'Invoke-QueLoadCommand', 'Invoke-QueImportCommand', 'Invoke-QueUpdateCommand',
             'Invoke-QueRenameCommand', 'Invoke-QueResetCommand', 'Invoke-QuePublishCommand',
             'Invoke-QueNewCommand', 'Invoke-QueCloneCommand'
         )
