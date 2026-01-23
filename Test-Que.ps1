@@ -121,6 +121,10 @@ $script:TestResults = @{
     StepsFailed = 0
     Workspace1Path = $null
     Workspace2Path = $null
+    Workspace1ClonePath = $null
+    Workspace2ClonePath = $null
+    Workspace1CloneName = $null
+    Workspace2CloneName = $null
     SyncThingPIDs = @()
     GitHubRepoName = "test-que-demo-repo"
     GitHubUser = $null
@@ -781,6 +785,8 @@ try {
 
         $FirstClonePath = $FirstClone.FullName
         Write-TestSuccess "First clone created at: $FirstClonePath"
+        $script:TestResults.Workspace1ClonePath = $FirstClonePath
+        $script:TestResults.Workspace1CloneName = $FirstClone.Name
 
         # Validate Git repository
         if (-not (Test-Path "$FirstClonePath\.git")) {
@@ -913,6 +919,8 @@ try {
             Write-TestFailure "No clone directory found in second workspace"
         }
         Write-TestSuccess "Second workspace clone created at: $($SecondClone.FullName)"
+        $script:TestResults.Workspace2ClonePath = $SecondClone.FullName
+        $script:TestResults.Workspace2CloneName = $SecondClone.Name
 
         # Verify SyncThing is running (should have 2 instances now)
         Start-Sleep -Seconds 3  # Give SyncThing time to start
@@ -938,7 +946,7 @@ catch {
 
 #region Phase 5: Git LFS Commit Test
 
-Write-TestStep "Phase 5: Creating and pushing LFS-tracked file"
+Write-TestStep "Phase 5: Creating and publishing LFS-tracked file"
 
 try {
     if ($PSCmdlet.ShouldProcess("LFS test file", "create and push")) {
@@ -947,12 +955,19 @@ try {
             Write-TestFailure "Second workspace not available for LFS test"
         }
 
-        $SecondClone = Get-ChildItem "$($script:TestResults.Workspace2Path)\repo" -Directory | Select-Object -First 1
-        if (-not $SecondClone) {
-            Write-TestFailure "Could not find second workspace clone directory"
+        $SecondClonePath = $script:TestResults.Workspace2ClonePath
+        $SecondCloneName = $script:TestResults.Workspace2CloneName
+        if (-not $SecondClonePath -or -not (Test-Path $SecondClonePath)) {
+            $SecondClone = Get-ChildItem "$($script:TestResults.Workspace2Path)\repo" -Directory | Select-Object -First 1
+            if (-not $SecondClone) {
+                Write-TestFailure "Could not find second workspace clone directory"
+            }
+            $SecondClonePath = $SecondClone.FullName
+            $SecondCloneName = $SecondClone.Name
+            $script:TestResults.Workspace2ClonePath = $SecondClonePath
+            $script:TestResults.Workspace2CloneName = $SecondCloneName
         }
 
-        $SecondClonePath = $SecondClone.FullName
         Write-Host "Using second workspace clone: $SecondClonePath" -ForegroundColor Cyan
 
         Push-Location $SecondClonePath
@@ -963,34 +978,25 @@ try {
         Set-Content -Path $LfsFile -Value $TestContent
         Write-TestSuccess "Created test .uasset file: $LfsFile"
 
-        # Step 5.2: Add, commit, and push the LFS file
-        git add $LfsFile
+        # Step 5.2: Save work to que/<clone> and publish to main (with default tag)
+        $SavedBranch = Invoke-QueSaveCommand -CloneRoot $SecondClonePath
+        if ($SavedBranch -ne "que/$SecondCloneName") {
+            Pop-Location
+            Write-TestFailure "Unexpected save branch name. Expected que/$SecondCloneName, got $SavedBranch"
+        }
+        Write-TestSuccess "Saved changes on branch: $SavedBranch"
+
+        $PublishedBranch = Invoke-QuePublishCommand -CloneRoot $SecondClonePath -TagName "lkg"
+        Write-TestSuccess "Published branch $PublishedBranch to main and updated tag 'lkg'"
+
+        # Verify remote work branch exists
+        $BranchRef = "refs/remotes/origin/que/$SecondCloneName"
+        git show-ref --verify $BranchRef 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
-            Write-TestFailure "Failed to stage LFS file"
+            Write-TestFailure "Remote branch not found after publish: que/$SecondCloneName"
         }
-        Write-TestSuccess "Staged LFS file"
-
-        # Check LFS status
-        $LfsStatus = git lfs status 2>&1
-        Write-Host "LFS Status:" -ForegroundColor Gray
-        Write-Host $LfsStatus -ForegroundColor Gray
-
-        # Commit
-        git commit -m "Test: Add LFS-tracked .uasset file"
-        if ($LASTEXITCODE -ne 0) {
-            Pop-Location
-            Write-TestFailure "Failed to commit LFS file"
-        }
-        Write-TestSuccess "Committed LFS file"
-
-        # Push
-        git push origin main
-        if ($LASTEXITCODE -ne 0) {
-            Pop-Location
-            Write-TestFailure "Failed to push LFS file to GitHub"
-        }
-        Write-TestSuccess "Pushed LFS file to GitHub"
+        Write-TestSuccess "Remote work branch exists: que/$SecondCloneName"
 
         # Verify the file is tracked by LFS
         $LfsLs = git lfs ls-files
@@ -1079,35 +1085,16 @@ try {
             }
         }
 
-        # Step 6.3: Commit and push the change
-        Write-Host "`nStep 6.3: Committing and pushing SyncThing device ID" -ForegroundColor Cyan
+        # Step 6.3: Publish the change using que workflow commands
+        Write-Host "`nStep 6.3: Publishing SyncThing device ID via que workflow" -ForegroundColor Cyan
 
-        git add "que57-project.ps1"
-        if ($LASTEXITCODE -ne 0) {
-            # If add fails, it might mean there's nothing to add (already committed)
-            Write-Host "Git add returned non-zero. Checking if there are changes to commit..." -ForegroundColor Yellow
-        }
-
-        git commit -m "Test: Add workspace 2 SyncThing device ID" 2>&1 | Out-Null
-        $CommitExitCode = $LASTEXITCODE
-
-        if ($CommitExitCode -eq 0) {
-            Write-TestSuccess "Committed device ID change"
-
-            git push origin main 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                Pop-Location
-                Write-TestFailure "Failed to push device ID change to GitHub"
-            }
-            Write-TestSuccess "Pushed device ID change to GitHub"
-        } else {
-            Write-Host "No changes to commit (may already be committed)" -ForegroundColor Yellow
-        }
+        $PublishedSyncBranch = Invoke-QuePublishCommand -CloneRoot $Workspace2ClonePath
+        Write-TestSuccess "Published device ID change from branch: $PublishedSyncBranch"
 
         Pop-Location
 
-        # Step 6.4: Switch to workspace 1 and pull
-        Write-Host "`nStep 6.4: Pulling changes in workspace 1" -ForegroundColor Cyan
+        # Step 6.4: Switch to workspace 1 and update
+        Write-Host "`nStep 6.4: Updating workspace 1" -ForegroundColor Cyan
 
         $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
         if (-not $Workspace1Clone) {
@@ -1119,12 +1106,8 @@ try {
 
         Push-Location $Workspace1ClonePath
 
-        git pull origin main 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Pop-Location
-            Write-TestFailure "Failed to pull changes in workspace 1"
-        }
-        Write-TestSuccess "Pulled changes in workspace 1"
+        Invoke-QueUpdateCommand -CloneRoot $Workspace1ClonePath | Out-Null
+        Write-TestSuccess "Updated workspace 1 with latest main"
 
         # Verify the que script was updated
         $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que57-project.ps1"
@@ -1464,28 +1447,23 @@ try {
 
         Write-TestSuccess "LFS cache object synced to workspace 1 via SyncThing"
 
-        # Step 8.3: Pull in workspace 1 and verify LFS file checkout
-        Write-Host "`nStep 8.3: Running git pull in workspace 1" -ForegroundColor Cyan
+        # Step 8.3: Update workspace 1 and verify LFS file checkout
+        Write-Host "`nStep 8.3: Running que update in workspace 1" -ForegroundColor Cyan
 
-        $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
-        if (-not $Workspace1Clone) {
-            Write-TestFailure "Could not find workspace 1 clone directory"
+        $Workspace1ClonePath = $script:TestResults.Workspace1ClonePath
+        if (-not $Workspace1ClonePath -or -not (Test-Path $Workspace1ClonePath)) {
+            $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
+            if (-not $Workspace1Clone) {
+                Write-TestFailure "Could not find workspace 1 clone directory"
+            }
+            $Workspace1ClonePath = $Workspace1Clone.FullName
+            $script:TestResults.Workspace1ClonePath = $Workspace1ClonePath
         }
 
-        $Workspace1ClonePath = $Workspace1Clone.FullName
         Push-Location $Workspace1ClonePath
 
-        # Run git pull
-        $PullOutput = git pull origin main 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Pop-Location
-            Write-Host "Git pull output:" -ForegroundColor Red
-            $PullOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-            Write-TestFailure "Git pull failed in workspace 1"
-        }
-        Write-TestSuccess "Git pull completed successfully"
-        Write-Host "Pull output:" -ForegroundColor Gray
-        $PullOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        Invoke-QueUpdateCommand -CloneRoot $Workspace1ClonePath | Out-Null
+        Write-TestSuccess "que update completed successfully"
 
         # Step 8.4: Verify LFS file is checked out (not a pointer)
         Write-Host "`nStep 8.4: Verifying LFS file is properly checked out" -ForegroundColor Cyan
@@ -1554,13 +1532,21 @@ try {
             Write-TestFailure "First workspace not available for multiple clones test"
         }
 
-        # Find the generated script in the first workspace
-        $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
-        if (-not $Workspace1Clone) {
-            Write-TestFailure "Could not find first workspace clone directory"
+        # Use the primary clone as the source for que clone
+        $Workspace1PrimaryClonePath = $script:TestResults.Workspace1ClonePath
+        $Workspace1PrimaryCloneName = $script:TestResults.Workspace1CloneName
+        if (-not $Workspace1PrimaryClonePath -or -not (Test-Path $Workspace1PrimaryClonePath)) {
+            $Workspace1Clone = Get-ChildItem "$($script:TestResults.Workspace1Path)\repo" -Directory | Select-Object -First 1
+            if (-not $Workspace1Clone) {
+                Write-TestFailure "Could not find first workspace clone directory"
+            }
+            $Workspace1PrimaryClonePath = $Workspace1Clone.FullName
+            $Workspace1PrimaryCloneName = $Workspace1Clone.Name
+            $script:TestResults.Workspace1ClonePath = $Workspace1PrimaryClonePath
+            $script:TestResults.Workspace1CloneName = $Workspace1PrimaryCloneName
         }
 
-        $GeneratedScript = Join-Path $Workspace1Clone.FullName "que57-project.ps1"
+        $GeneratedScript = Join-Path $Workspace1PrimaryClonePath "que57-project.ps1"
         if (-not (Test-Path $GeneratedScript)) {
             Write-TestFailure "Generated script not found at: $GeneratedScript"
         }
@@ -1581,7 +1567,12 @@ try {
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Initialize-SyncThing',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
-            'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain'
+            'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain', 'Invoke-QueGit',
+            'Get-QueCurrentBranch', 'Get-QueCloneNameFromPath', 'Invoke-QueMerge',
+            'Invoke-QuePushWithRetry', 'Invoke-QueStashAll', 'Invoke-QueSaveCommand',
+            'Invoke-QueOpenBranchCommand', 'Invoke-QueImportCommand', 'Invoke-QueUpdateCommand',
+            'Invoke-QueRenameCommand', 'Invoke-QueResetCommand', 'Invoke-QuePublishCommand',
+            'Invoke-QueNewCommand', 'Invoke-QueCloneCommand'
         )
 
         foreach ($FuncName in $FunctionsToRemove) {
@@ -1604,13 +1595,13 @@ try {
             Write-TestFailure "Failed to validate GitHub token for clone creation"
         }
 
-        # Create the second clone using New-QueClone
-        Write-Host "Creating second clone in workspace 1..." -ForegroundColor Cyan
-        New-QueClone -WorkspaceRoot $script:TestResults.Workspace1Path `
-                     -IsFirstClone $false `
-                     -ShouldClone $true `
-                     -UserInfo $TestUser `
-                     -PlainPAT $GitHubToken
+        # Create the second clone using que clone (bases on current branch state)
+        Write-Host "Creating second clone in workspace 1 using que clone..." -ForegroundColor Cyan
+        $NewCloneRoot = Invoke-QueCloneCommand -WorkspaceRoot $script:TestResults.Workspace1Path `
+                                              -SourceCloneRoot $Workspace1PrimaryClonePath `
+                                              -SkipLaunch
+        $NewCloneName = Split-Path $NewCloneRoot -Leaf
+        Write-TestSuccess "Second clone created via que clone: $NewCloneRoot"
 
         # Step 9.2: Validate Clone Structure
         Write-Host "`nStep 9.2: Validating clone structure" -ForegroundColor Cyan
@@ -1684,6 +1675,58 @@ try {
         Write-Host "    +-- sync/" -ForegroundColor Gray
         Write-Host "    +-- env/" -ForegroundColor Gray
         Write-Host "    +-- .que/" -ForegroundColor Gray
+
+        # Step 9.3: Validate que import between clone branches
+        Write-Host "`nStep 9.3: Importing changes between clone branches" -ForegroundColor Cyan
+
+        $PrimaryClonePath = $Workspace1PrimaryClonePath
+        $PrimaryCloneName = $Workspace1PrimaryCloneName
+        $SecondaryClone = $AllClones | Where-Object { $_.FullName -ne $PrimaryClonePath } | Select-Object -First 1
+        if (-not $SecondaryClone) {
+            Write-TestFailure "Could not locate secondary clone for import test"
+        }
+        $SecondaryClonePath = $SecondaryClone.FullName
+        $SecondaryCloneName = $SecondaryClone.Name
+
+        # Create change on the primary clone and save to its branch
+        Push-Location $PrimaryClonePath
+        $ImportFile = "import-from-$PrimaryCloneName.txt"
+        $ImportContent = "Import test from $PrimaryCloneName at $(Get-Date -Format 'o')"
+        Set-Content -Path $ImportFile -Value $ImportContent -Encoding UTF8
+        $PrimaryBranch = Invoke-QueSaveCommand -CloneRoot $PrimaryClonePath
+        if ($PrimaryBranch -ne "que/$PrimaryCloneName") {
+            Pop-Location
+            Write-TestFailure "Unexpected primary branch name. Expected que/$PrimaryCloneName, got $PrimaryBranch"
+        }
+        Write-TestSuccess "Created and saved import change on $PrimaryBranch"
+        Pop-Location
+
+        # Ensure secondary branch exists, then import the primary branch
+        Push-Location $SecondaryClonePath
+        $SecondaryBranch = Invoke-QueSaveCommand -CloneRoot $SecondaryClonePath
+        if ($SecondaryBranch -ne "que/$SecondaryCloneName") {
+            Pop-Location
+            Write-TestFailure "Unexpected secondary branch name. Expected que/$SecondaryCloneName, got $SecondaryBranch"
+        }
+        Write-TestSuccess "Ensured secondary branch exists: $SecondaryBranch"
+
+        Invoke-QueImportCommand -CloneRoot $SecondaryClonePath -Name $PrimaryCloneName
+        Write-TestSuccess "Imported que/$PrimaryCloneName into $SecondaryBranch"
+
+        $ImportedFilePath = Join-Path $SecondaryClonePath $ImportFile
+        if (-not (Test-Path $ImportedFilePath)) {
+            Pop-Location
+            Write-TestFailure "Imported file missing after import: $ImportedFilePath"
+        }
+        Write-TestSuccess "Imported file present in secondary clone: $ImportedFilePath"
+
+        $PostImportBranch = Invoke-QueSaveCommand -CloneRoot $SecondaryClonePath
+        if ($PostImportBranch -ne $SecondaryBranch) {
+            Pop-Location
+            Write-TestFailure "Post-import save returned unexpected branch. Expected $SecondaryBranch, got $PostImportBranch"
+        }
+        Write-TestSuccess "Saved imported changes on branch: $PostImportBranch"
+        Pop-Location
 
         Write-TestSuccess "Multiple clones test completed successfully"
     }
