@@ -95,61 +95,6 @@ x86/
 [Oo]bj/
 '@
 
-# UE Project .gitattributes
-$EmbeddedUEGitAttributes = @'
-# Unreal Engine asset files
-*.uasset filter=lfs diff=lfs merge=lfs -text
-*.umap filter=lfs diff=lfs merge=lfs -text
-*.upk filter=lfs diff=lfs merge=lfs -text
-*.udk filter=lfs diff=lfs merge=lfs -text
-*.ubulk filter=lfs diff=lfs merge=lfs -text
-*.uexp filter=lfs diff=lfs merge=lfs -text
-*.ufont filter=lfs diff=lfs merge=lfs -text
-*.uassetc filter=lfs diff=lfs merge=lfs -text
-*.umaterialc filter=lfs diff=lfs merge=lfs -text
-'@
-
-# UE Project .gitignore
-$EmbeddedUEGitIgnore = @'
-# Unreal Engine generated files
-Binaries/
-Build/
-DerivedDataCache/
-Intermediate/
-Saved/
-Script/
-.vs/
-
-# Unreal Editor specific
-*.VC.db
-*.opensdf
-*.opendb
-*.sdf
-*.sln
-*.suo
-*.xcodeproj
-*.xcworkspace
-
-# Compiled source
-*.com
-*.class
-*.dll
-*.exe
-*.o
-*.so
-
-# Plugins
-Plugins/*/Binaries/
-Plugins/*/Intermediate/
-
-# Cache files
-*.VC.VC.opendb
-*.VC.db
-
-# Starter Content (uncomment if you don't want it tracked)
-# Content/StarterContent/
-'@
-
 # README.md template for generated repos
 $EmbeddedReadme = @'
 # {{REPO}} - Unreal Engine 5.7 Project
@@ -228,6 +173,61 @@ workspace-root/
 QUE is a single-file PowerShell solution for managing Unreal Engine projects with Git, GitLFS, and SyncThing integration. Learn more at https://github.com/karlgluck/que
 '@
 ###QUE_EMBEDDED_FILES_END###
+
+# UE Project .gitattributes
+$EmbeddedUEGitAttributes = @'
+# Unreal Engine asset files
+*.uasset filter=lfs diff=lfs merge=lfs -text
+*.umap filter=lfs diff=lfs merge=lfs -text
+*.upk filter=lfs diff=lfs merge=lfs -text
+*.udk filter=lfs diff=lfs merge=lfs -text
+*.ubulk filter=lfs diff=lfs merge=lfs -text
+*.uexp filter=lfs diff=lfs merge=lfs -text
+*.ufont filter=lfs diff=lfs merge=lfs -text
+*.uassetc filter=lfs diff=lfs merge=lfs -text
+*.umaterialc filter=lfs diff=lfs merge=lfs -text
+'@
+
+# UE Project .gitignore
+$EmbeddedUEGitIgnore = @'
+# Unreal Engine generated files
+Binaries/
+Build/
+DerivedDataCache/
+Intermediate/
+Saved/
+Script/
+.vs/
+
+# Unreal Editor specific
+*.VC.db
+*.opensdf
+*.opendb
+*.sdf
+*.sln
+*.suo
+*.xcodeproj
+*.xcworkspace
+
+# Compiled source
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Plugins
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+
+# Cache files
+*.VC.VC.opendb
+*.VC.db
+
+# Starter Content (uncomment if you don't want it tracked)
+# Content/StarterContent/
+'@
 
 # ----------------------------------------------------------------------------
 # SYNCTHING DEVICES (only in que57-project.ps1)
