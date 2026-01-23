@@ -397,7 +397,8 @@ function Get-NextCloneName {
             }
         }
         $Word = ($Syllables -join '').Trim()
-        if ($Word -and ($Word.ToLower() -notin $ExistingNames)) {
+        $HasTripleRepeat = $Word -match '(.)\1\1'
+        if ($Word -and -not $HasTripleRepeat -and ($Word.ToLower() -notin $ExistingNames)) {
             return $Word
         }
     }
