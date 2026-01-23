@@ -1779,8 +1779,8 @@ function Show-TestSummary {
     if ($script:TestResults.SyncThingPIDs.Count -gt 0) {
         Write-Host ""
         Write-Host "SyncThing Processes:" -ForegroundColor Cyan
-        foreach ($pid in $script:TestResults.SyncThingPIDs) {
-            Write-Host "  - PID: $pid"
+        foreach ($SyncThingPid in $script:TestResults.SyncThingPIDs) {
+            Write-Host "  - PID: $SyncThingPid"
         }
     }
 
