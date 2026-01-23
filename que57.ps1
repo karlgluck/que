@@ -640,7 +640,7 @@ function Invoke-SyncThingCli {
         [string]$SyncThingHome,
         [string]$GuiAddress,
         [string]$ApiKey,
-        [string[]]$Args,
+        [Parameter(ValueFromRemainingArguments = $true)][string[]]$Args,
         [switch]$QuietErrors
     )
     $BaseArgs = @(
@@ -723,7 +723,7 @@ function Ensure-SyncThingRunning {
         $Port | Set-Content $PortFile
         Write-Host "Generated and stored new SyncThing port: $Port" -ForegroundColor Green
     }
-    $RawAddress = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @("config", "gui", "raw-address", "get") -QuietErrors
+    $RawAddress = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "gui", "raw-address", "get") -QuietErrors
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Starting SyncThing at $GuiAddress..." -ForegroundColor Cyan
         $StartArgs = @(
@@ -746,7 +746,7 @@ function Ensure-SyncThingRunning {
     } else {
         Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
     }
-    $DeviceIdList = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @("config", "devices", "list") -QuietErrors
+    $DeviceIdList = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "devices", "list") -QuietErrors
     $DeviceId = $DeviceIdList | Select-Object -First 1
     if (-not $DeviceId) {
         Write-Warning "Could not retrieve device ID"
@@ -787,7 +787,7 @@ function Configure-SyncThingFolders {
     $LfsFolderId = "$GitHubRepo-lfs"
     $LfsLabel = "$GitHubRepo Git LFS"
     Write-Host "Configuring SyncThing folder: $LfsLabel" -ForegroundColor Cyan
-    Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
+    Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
         "config"
         "folders"
         "add"
@@ -801,7 +801,7 @@ function Configure-SyncThingFolders {
     $DepotFolderId = "$GitHubRepo-depot"
     $DepotLabel = "$GitHubRepo Depot"
     Write-Host "Configuring SyncThing folder: $DepotLabel" -ForegroundColor Cyan
-    Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
+    Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
         "config"
         "folders"
         "add"
@@ -830,11 +830,11 @@ function Update-SyncThingDevices {
     $ApiKey = $SyncThingInfo.ApiKey
     $LfsFolderId = "$GitHubRepo-lfs"
     $DepotFolderId = "$GitHubRepo-depot"
-    $AllKnownDeviceIds = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @("config", "devices", "list") -QuietErrors
+    $AllKnownDeviceIds = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "devices", "list") -QuietErrors
     foreach ($DeviceId in $DeviceIds) {
         if ($DeviceId -and $AllKnownDeviceIds -notcontains $DeviceId) {
             Write-Host "Adding SyncThing peer: $DeviceId" -ForegroundColor Green
-            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
+            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
                 "config"
                 "devices"
                 "add"
@@ -842,7 +842,7 @@ function Update-SyncThingDevices {
                 "--auto-accept-folders"
             )
             Write-Host "  Sharing git-lfs folder with peer" -ForegroundColor Cyan
-            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
+            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
                 "config"
                 "folders"
                 $LfsFolderId
@@ -851,7 +851,7 @@ function Update-SyncThingDevices {
                 "--device-id=$DeviceId"
             ) -QuietErrors
             Write-Host "  Sharing depot folder with peer" -ForegroundColor Cyan
-            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey @(
+            Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
                 "config"
                 "folders"
                 $DepotFolderId
