@@ -868,6 +868,127 @@ function Update-SyncThingDevices {
     Write-Host "SyncThing devices configured successfully" -ForegroundColor Green
 }
 
+function Wait-ForSyncThingLfsSync {
+    # Waits for SyncThing to sync the git-lfs folder with a progress bar
+    param(
+        [string]$WorkspaceRoot,
+        [int]$TimeoutSeconds = 300,
+        [switch]$Silent
+    )
+
+    # Get SyncThing configuration
+    $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
+    if (-not (Test-Path $SyncThingHome)) {
+        if (-not $Silent) { Write-Host "SyncThing not configured, skipping sync wait" -ForegroundColor Yellow }
+        return $true
+    }
+
+    $ApiKeyFile = Join-Path $WorkspaceRoot "env\syncthing-home\.api-key"
+    $PortFile = Join-Path $WorkspaceRoot "env\syncthing-home\.port"
+
+    if (-not (Test-Path $ApiKeyFile) -or -not (Test-Path $PortFile)) {
+        if (-not $Silent) { Write-Host "SyncThing configuration incomplete, skipping sync wait" -ForegroundColor Yellow }
+        return $true
+    }
+
+    try {
+        $ApiKey = Get-Content $ApiKeyFile -Raw -ErrorAction Stop
+        $ApiKey = $ApiKey.Trim()
+        $Port = Get-Content $PortFile -Raw -ErrorAction Stop
+        $Port = $Port.Trim()
+        $GuiAddress = "127.0.0.1:$Port"
+    } catch {
+        if (-not $Silent) { Write-Host "Failed to read SyncThing config, skipping sync wait" -ForegroundColor Yellow }
+        return $true
+    }
+
+    $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name" -ErrorAction SilentlyContinue
+    if (-not $GitHubRepo) {
+        if (-not $Silent) { Write-Host "Cannot determine repository name, skipping sync wait" -ForegroundColor Yellow }
+        return $true
+    }
+
+    $LfsFolderId = "$GitHubRepo-git-lfs"
+
+    # Check if we need to wait at all
+    $BaseUrl = "http://$GuiAddress/rest"
+    $Headers = @{ "X-API-Key" = $ApiKey }
+
+    try {
+        # Get folder status to see if there are any out-of-sync items
+        $StatusUrl = "$BaseUrl/db/status?folder=$LfsFolderId"
+        $Status = Invoke-RestMethod -Uri $StatusUrl -Headers $Headers -Method Get -TimeoutSec 5 -ErrorAction Stop
+
+        # Check if folder is already in sync
+        if ($Status.needBytes -eq 0 -and $Status.needDeletes -eq 0 -and $Status.needFiles -eq 0) {
+            if (-not $Silent) { Write-Host "LFS folder already in sync" -ForegroundColor Green }
+            return $true
+        }
+
+        if (-not $Silent) {
+            $needMB = [math]::Round($Status.needBytes / 1MB, 2)
+            Write-Host "Waiting for SyncThing to sync LFS files ($($Status.needFiles) files, $needMB MB)..." -ForegroundColor Cyan
+        }
+
+        # Wait for sync with progress bar
+        $StartTime = Get-Date
+        $LastPercent = -1
+
+        while (((Get-Date) - $StartTime).TotalSeconds -lt $TimeoutSeconds) {
+            try {
+                $Status = Invoke-RestMethod -Uri $StatusUrl -Headers $Headers -Method Get -TimeoutSec 5 -ErrorAction Stop
+
+                # Calculate completion percentage
+                if ($Status.globalBytes -gt 0) {
+                    $Percent = [math]::Round((($Status.globalBytes - $Status.needBytes) / $Status.globalBytes) * 100, 1)
+                } else {
+                    $Percent = 100
+                }
+
+                # Show progress bar if percentage changed
+                if ($Percent -ne $LastPercent -and -not $Silent) {
+                    $ElapsedSeconds = [int]((Get-Date) - $StartTime).TotalSeconds
+                    Write-Progress -Activity "Syncing LFS files via SyncThing" `
+                                   -Status "$Percent% complete ($($Status.needFiles) files remaining)" `
+                                   -PercentComplete $Percent `
+                                   -SecondsRemaining (if ($Percent -gt 0) { [int]($ElapsedSeconds * (100 - $Percent) / $Percent) } else { -1 })
+                    $LastPercent = $Percent
+                }
+
+                # Check if sync is complete
+                if ($Status.needBytes -eq 0 -and $Status.needDeletes -eq 0 -and $Status.needFiles -eq 0) {
+                    if (-not $Silent) {
+                        Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
+                        Write-Host "LFS sync complete" -ForegroundColor Green
+                    }
+                    return $true
+                }
+
+                Start-Sleep -Milliseconds 500
+            } catch {
+                # API call failed, likely SyncThing not running
+                if (-not $Silent) {
+                    Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
+                    Write-Host "SyncThing API unavailable, proceeding without sync wait" -ForegroundColor Yellow
+                }
+                return $false
+            }
+        }
+
+        # Timeout reached
+        if (-not $Silent) {
+            Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
+            Write-Host "Sync wait timeout reached after $TimeoutSeconds seconds" -ForegroundColor Yellow
+            Write-Host "Some LFS files may not be available yet" -ForegroundColor Yellow
+        }
+        return $false
+
+    } catch {
+        if (-not $Silent) { Write-Host "Failed to check SyncThing status: $($_.Exception.Message)" -ForegroundColor Yellow }
+        return $false
+    }
+}
+
 # Git Helper Functions
 
 function Write-GitConfigFiles {
@@ -1120,6 +1241,8 @@ function New-QueWorkspace {
         Pop-Location
         Write-Host "Imported from local repository into $CloneRoot" -ForegroundColor Green
     } elseif ($InitMode -eq 3) {
+        # Wait for SyncThing to sync LFS files before pulling
+        Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
         Push-Location $CloneRoot
         git pull 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
@@ -1368,6 +1491,11 @@ function Invoke-QueSaveCommand {
     $CloneName = Get-QueCloneNameFromPath -CloneRoot $CloneRoot
     $CurrentBranch = Get-QueCurrentBranch -CloneRoot $CloneRoot
     if ($CurrentBranch -eq $script:QueMainBranch) {
+        # Wait for SyncThing to sync LFS files before switching branches
+        $WorkspaceRoot = Find-QueWorkspace -StartPath $CloneRoot
+        if ($WorkspaceRoot) {
+            Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
+        }
         $WorkBranch = "que/$CloneName"
         $Existing = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/heads/$WorkBranch") -AllowFailure
         if ($Existing.ExitCode -eq 0) {
@@ -1396,6 +1524,11 @@ function Invoke-QueSaveCommand {
 function Invoke-QueOpenBranchCommand {
     param([string]$CloneRoot, [string]$Name)
     if (-not $Name) { throw "Branch name is required for 'que open'." }
+    # Wait for SyncThing to sync LFS files before switching branches
+    $WorkspaceRoot = Find-QueWorkspace -StartPath $CloneRoot
+    if ($WorkspaceRoot) {
+        Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
+    }
     $BranchName = "que/$Name"
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $BranchName) | Out-Null
     $RemoteCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/remotes/origin/$BranchName") -AllowFailure
@@ -1430,6 +1563,11 @@ function Invoke-QueImportCommand {
 
 function Invoke-QueUpdateCommand {
     param([string]$CloneRoot)
+    # Wait for SyncThing to sync LFS files before pulling/merging
+    $WorkspaceRoot = Find-QueWorkspace -StartPath $CloneRoot
+    if ($WorkspaceRoot) {
+        Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
+    }
     $CurrentBranch = Get-QueCurrentBranch -CloneRoot $CloneRoot
     if ($CurrentBranch -eq $script:QueMainBranch) {
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("pull", "--no-rebase", "origin", $script:QueMainBranch) | Out-Null
@@ -1462,6 +1600,11 @@ function Invoke-QueRenameCommand {
 
 function Invoke-QueResetCommand {
     param([string]$CloneRoot)
+    # Wait for SyncThing to sync LFS files before switching branches
+    $WorkspaceRoot = Find-QueWorkspace -StartPath $CloneRoot
+    if ($WorkspaceRoot) {
+        Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
+    }
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rebase", "--abort") -AllowFailure | Out-Null
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("merge", "--abort") -AllowFailure | Out-Null
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("cherry-pick", "--abort") -AllowFailure | Out-Null
@@ -1486,6 +1629,36 @@ function Invoke-QuePublishCommand {
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("pull", "--no-rebase", "origin", $script:QueMainBranch) | Out-Null
     Invoke-QueMerge -CloneRoot $CloneRoot -Source $WorkBranch -Message ("que: publish {0}" -f $WorkBranch) | Out-Null
     Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $script:QueMainBranch | Out-Null
+
+    # Push LFS objects to GitHub for disaster recovery
+    Write-Host "Publishing LFS files to GitHub for backup..." -ForegroundColor Cyan
+    Push-Location $CloneRoot
+    try {
+        # Check if there are any LFS files to push
+        $LfsFiles = git lfs ls-files 2>&1
+        if ($LASTEXITCODE -eq 0 -and $LfsFiles) {
+            Write-Host "Uploading LFS objects to GitHub (this provides disaster recovery)..." -ForegroundColor Yellow
+            git lfs push --all origin 2>&1 | ForEach-Object {
+                if ($_ -match "Uploading|Upload|Counting|^Git LFS:") {
+                    Write-Host "  $_" -ForegroundColor Gray
+                }
+            }
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "LFS objects backed up to GitHub successfully" -ForegroundColor Green
+            } else {
+                Write-Host "Warning: LFS push encountered issues (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+                Write-Host "Pointer files were published, but some LFS objects may not be backed up to GitHub" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "No LFS files to back up" -ForegroundColor Gray
+        }
+    } catch {
+        Write-Host "Warning: Failed to push LFS objects: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "Continuing - pointer files were published successfully" -ForegroundColor Yellow
+    } finally {
+        Pop-Location
+    }
+
     if ($TagName) {
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("tag", "-f", $TagName) | Out-Null
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "-f", "origin", $TagName) | Out-Null
