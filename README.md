@@ -72,19 +72,6 @@ Once your workspace is set up, launch the management terminal using the shortcut
 4. Generate and copy the token
 5. Store it securely - you'll need it for workspace setup
 
-## Design Philosophy
-
-QUE trades some AutoDevEnv flexibility for simplicity:
-
-- **Embedded files**: Everything in one script (large, but traceable)
-- **Manual integration**: Bug fixes don't auto-propagate (prevents accidental breakage)
-- **Version-specific**: Each UE version gets its own script
-- **Self-contained**: No module updates or external dependencies
-
-## Version Files
-
-The `workspace-version` and `repo-version` files contain integer version numbers (initially "1"). These are for future manual upgrades only - not automatic updates. If you hand-edit the script to add new functionality, you can reference these versions to apply changes in order to older workspaces, then increment the version number.
-
 ## License
 
 MIT License - Feel free to fork and customize for your projects!

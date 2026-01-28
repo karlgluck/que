@@ -22,22 +22,16 @@ $UnrealEngineVersion = "5.7"
 # EMBEDDED FILES
 # ----------------------------------------------------------------------------
 ###QUE_EMBEDDED_FILES_BEGIN###
-# Repository .gitattributes
 $EmbeddedGitAttributes = @'
-# Git LFS tracking
 *.uasset filter=lfs diff=lfs merge=lfs -text
 *.umap filter=lfs diff=lfs merge=lfs -text
 *.upk filter=lfs diff=lfs merge=lfs -text
 *.udk filter=lfs diff=lfs merge=lfs -text
-
-# Binary files
 *.dll filter=lfs diff=lfs merge=lfs -text
 *.exe filter=lfs diff=lfs merge=lfs -text
 *.pdb filter=lfs diff=lfs merge=lfs -text
 *.so filter=lfs diff=lfs merge=lfs -text
 *.dylib filter=lfs diff=lfs merge=lfs -text
-
-# Media files
 *.png filter=lfs diff=lfs merge=lfs -text
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.jpeg filter=lfs diff=lfs merge=lfs -text
@@ -49,20 +43,13 @@ $EmbeddedGitAttributes = @'
 *.mp4 filter=lfs diff=lfs merge=lfs -text
 *.avi filter=lfs diff=lfs merge=lfs -text
 *.mov filter=lfs diff=lfs merge=lfs -text
-
-# 3D models
 *.fbx filter=lfs diff=lfs merge=lfs -text
 *.obj filter=lfs diff=lfs merge=lfs -text
 *.blend filter=lfs diff=lfs merge=lfs -text
 *.3ds filter=lfs diff=lfs merge=lfs -text
 '@
-
-# Repository .gitignore
 $EmbeddedGitIgnore = @'
-# QUE environment (contains encrypted PAT)
 env/
-
-# Visual Studio
 .vs/
 *.suo
 *.user
@@ -70,23 +57,15 @@ env/
 *.sln.docstates
 *.userprefs
 *.sln.ide/
-
-# VS Code
 .vscode/
 *.code-workspace
-
-# Windows
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
-
-# macOS
 .DS_Store
 .AppleDouble
 .LSOverride
-
-# Build results
 [Dd]ebug/
 [Rr]elease/
 x64/
@@ -174,9 +153,7 @@ QUE is a single-file PowerShell solution for managing Unreal Engine projects wit
 '@
 ###QUE_EMBEDDED_FILES_END###
 
-# UE Project .gitattributes
 $EmbeddedUEGitAttributes = @'
-# Unreal Engine asset files
 *.uasset filter=lfs diff=lfs merge=lfs -text
 *.umap filter=lfs diff=lfs merge=lfs -text
 *.upk filter=lfs diff=lfs merge=lfs -text
@@ -187,10 +164,7 @@ $EmbeddedUEGitAttributes = @'
 *.uassetc filter=lfs diff=lfs merge=lfs -text
 *.umaterialc filter=lfs diff=lfs merge=lfs -text
 '@
-
-# UE Project .gitignore
 $EmbeddedUEGitIgnore = @'
-# Unreal Engine generated files
 Binaries/
 Build/
 DerivedDataCache/
@@ -198,8 +172,6 @@ Intermediate/
 Saved/
 Script/
 .vs/
-
-# Unreal Editor specific
 *.VC.db
 *.opensdf
 *.opendb
@@ -208,25 +180,15 @@ Script/
 *.suo
 *.xcodeproj
 *.xcworkspace
-
-# Compiled source
 *.com
 *.class
 *.dll
 *.exe
 *.o
 *.so
-
-# Plugins
 Plugins/*/Binaries/
 Plugins/*/Intermediate/
-
-# Cache files
 *.VC.VC.opendb
-*.VC.db
-
-# Starter Content (uncomment if you don't want it tracked)
-# Content/StarterContent/
 '@
 
 # ----------------------------------------------------------------------------
@@ -239,6 +201,31 @@ Plugins/*/Intermediate/
 # ----------------------------------------------------------------------------
 # HELPER FUNCTIONS
 # ----------------------------------------------------------------------------
+
+# Short color output helpers to reduce verbosity
+function WG($m){Write-Host $m -ForegroundColor Green}
+function WC($m){Write-Host $m -ForegroundColor Cyan}
+function WY($m){Write-Host $m -ForegroundColor Yellow}
+function WW($m){Write-Host $m -ForegroundColor White}
+function WR($m){Write-Host $m -ForegroundColor Red}
+
+# Read plaintext from a SecureString file
+function Read-SecureFile($Path) {
+    $ss = Get-Content $Path | ConvertTo-SecureString
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss)
+    $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    return $plain
+}
+
+# Configure local git settings for a QUE clone
+function Set-QueGitConfig($UserInfo) {
+    git config --local user.name $UserInfo.name
+    git config --local user.email ("{0}-{1}@users.noreply.github.com" -f @($UserInfo.id, $UserInfo.login))
+    git config --local credential.username $UserInfo.login
+    git config --local lfs.locksverify false
+    git config --local push.autoSetupRemote true
+}
 
 function Find-QueWorkspace {
     # Searches current and parent directories for .que folder. Returns workspace root path or $null if not found.
@@ -279,11 +266,7 @@ function Get-SecureGitHubPAT {
     $PatFile = Join-Path $WorkspaceRoot "env\github\pat.dat"
     if (-not (Test-Path $PatFile)) { return $null }
     try {
-        $SecureString = Get-Content $PatFile | ConvertTo-SecureString
-        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
-        $PlainPAT = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-        return $PlainPAT
+        return Read-SecureFile $PatFile
     } catch {
         Write-Warning "Failed to decrypt PAT: $($_.Exception.Message)"
         return $null
@@ -332,6 +315,72 @@ function Test-GitHubPAT {
         return $null
     }
     return $null
+}
+
+function Test-GitHubRepoEmpty {
+    # Returns $true if the repo exists but has no commits
+    param([string]$Owner, [string]$Repo, [string]$PlainPAT)
+    try {
+        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
+        $CommitsUrl = "https://api.github.com/repos/$Owner/$Repo/commits?per_page=1"
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri $CommitsUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
+        if ($Response.StatusCode -eq 200) {
+            $Content = $Response.Content
+            if (-not $Content -or $Content.Trim() -eq "[]") { return $true }
+            return $false
+        }
+    } catch {
+        $StatusCode = $null
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+        }
+        if ($StatusCode -eq 409) { return $true } # Git Repository is empty
+        if ($StatusCode -eq 404) { return $false }
+        Write-Warning "Failed to check if repository has commits: $($_.Exception.Message)"
+        return $false
+    }
+    return $false
+}
+
+function Ensure-GitHubRepoExists {
+    # Creates the GitHub repo if it does not exist
+    param([string]$Owner, [string]$Repo, [string]$PlainPAT, [object]$UserInfo)
+    try {
+        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
+        $RepoUrl = "https://api.github.com/repos/$Owner/$Repo"
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
+        if ($Response.StatusCode -eq 200) { return $true }
+    } catch {
+        $StatusCode = $null
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+        }
+        if ($StatusCode -ne 404) {
+            Write-Error "Failed to check if repository exists: $($_.Exception.Message)"
+            return $false
+        }
+    }
+    WC "`nCreating GitHub repository $Owner/$Repo..."
+    try {
+        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
+        $CreateRepoBody = @{
+            name = $Repo
+            private = $true
+            auto_init = $false
+        } | ConvertTo-Json
+        $CreateUrl = if ($Owner -eq $UserInfo.login) {
+            "https://api.github.com/user/repos"
+        } else {
+            "https://api.github.com/orgs/$Owner/repos"
+        }
+        Invoke-WebRequest -UseBasicParsing -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
+        WG "Repository created successfully"
+        return $true
+    } catch {
+        Write-Error "Failed to create repository: $($_.Exception.Message)"
+        Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $Owner"
+        return $false
+    }
 }
 
 function Get-NextCloneName {
@@ -481,17 +530,17 @@ function Install-NetFx3WithElevation {
     try {
         $netfx3 = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5" -ErrorAction SilentlyContinue
         if ($netfx3.Version) {
-            Write-Host ".NET Framework 3.5 (NetFx3) is already enabled." -ForegroundColor Green
+            WG ".NET Framework 3.5 (NetFx3) is already enabled."
             return $true
         }
     } catch { }
-    Write-Host "Enabling .NET Framework 3.5 (NetFx3)..." -ForegroundColor Yellow
+    WY "Enabling .NET Framework 3.5 (NetFx3)..."
     if (-not (Test-IsAdmin)) {
-        Write-Host "NetFx3 installation requires administrator privileges. Launching elevated process..." -ForegroundColor Yellow
+        WY "NetFx3 installation requires administrator privileges. Launching elevated process..."
         $ElevatedScript = {
             try {
                 Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null
-                Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
+                WG ".NET Framework 3.5 enabled successfully"
                 Start-Sleep 5
                 exit 0
             } catch {
@@ -503,7 +552,7 @@ function Install-NetFx3WithElevation {
         $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ElevatedScript.ToString()))
         $Process = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-EncodedCommand", $EncodedCommand -Verb RunAs -Wait -PassThru
         if ($Process.ExitCode -eq 0) {
-            Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
+            WG ".NET Framework 3.5 enabled successfully"
             return $true
         } else {
             Write-Warning "Failed to enable NetFx3. You may need to enable it manually."
@@ -512,7 +561,7 @@ function Install-NetFx3WithElevation {
     } else {
         try {
             Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null
-            Write-Host ".NET Framework 3.5 enabled successfully" -ForegroundColor Green
+            WG ".NET Framework 3.5 enabled successfully"
             return $true
         } catch {
             Write-Warning "Failed to enable NetFx3: $($_.Exception.Message)"
@@ -524,15 +573,15 @@ function Install-NetFx3WithElevation {
 function Sync-WingetPackage {
     # Installs or updates a package using winget with retry logic (3 attempts)
     param([string]$PackageName, [string]$PackageParameters = '')
-    Write-Host "Ensuring $PackageName is installed..." -ForegroundColor Cyan
-    $ListOutput = & winget list --id $PackageName --exact 2>&1
+    WC "Ensuring $PackageName is installed..."
+    $ListOutput = & winget list --id $PackageName --exact --accept-source-agreements 2>&1
     if ($LASTEXITCODE -eq 0 -and $ListOutput -match $PackageName) {
-        Write-Host "$PackageName is already installed" -ForegroundColor Green
+        WG "$PackageName is already installed"
         return
     }
     $MaxAttempts = 3
     for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
-        Write-Host "Installing $PackageName (attempt $Attempt of $MaxAttempts)..." -ForegroundColor Yellow
+        WY "Installing $PackageName (attempt $Attempt of $MaxAttempts)..."
         $InstallArgs = @('install', '--id', $PackageName, '--exact', '--accept-source-agreements', '--accept-package-agreements')
         if ($Attempt -lt $MaxAttempts) { $InstallArgs += '--silent' }
         if ($PackageParameters) {
@@ -541,7 +590,7 @@ function Sync-WingetPackage {
         }
         & winget @InstallArgs
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "$PackageName installed successfully" -ForegroundColor Green
+            WG "$PackageName installed successfully"
             $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
             return
         }
@@ -675,10 +724,7 @@ function Ensure-SyncThingRunning {
     $IsFirstTime = $false
     if (Test-Path $ApiKeyFile) {
         try {
-            $SecureString = Get-Content $ApiKeyFile | ConvertTo-SecureString
-            $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
-            $ApiKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+            $ApiKey = Read-SecureFile $ApiKeyFile
             Write-Host "Using existing SyncThing API key" -ForegroundColor Gray
         } catch {
             Write-Warning "Failed to decrypt API key: $($_.Exception.Message)"
@@ -688,7 +734,7 @@ function Ensure-SyncThingRunning {
     if (-not $ApiKey) {
         $IsFirstTime = $true
         if (Test-Path $ConfigPath) {
-            Write-Host "Removing existing SyncThing config for fresh initialization..." -ForegroundColor Yellow
+            WY "Removing existing SyncThing config for fresh initialization..."
             Remove-Item $ConfigPath -Force
         }
         $ApiKey = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | ForEach-Object {[char]$_})
@@ -698,7 +744,7 @@ function Ensure-SyncThingRunning {
         }
         $SecureString = ConvertTo-SecureString $ApiKey -AsPlainText -Force
         $SecureString | ConvertFrom-SecureString | Set-Content $ApiKeyFile
-        Write-Host "Generated and stored new SyncThing API key" -ForegroundColor Green
+        WG "Generated and stored new SyncThing API key"
     }
     $PortFile = Join-Path $WorkspaceRoot ".que\syncthing\gui.port"
     $PortFileDir = Split-Path $PortFile -Parent
@@ -721,11 +767,11 @@ function Ensure-SyncThingRunning {
         $Port = Get-AvailableSyncThingPort
         $GuiAddress = "127.0.0.1:$Port"
         $Port | Set-Content $PortFile
-        Write-Host "Generated and stored new SyncThing port: $Port" -ForegroundColor Green
+        WG "Generated and stored new SyncThing port: $Port"
     }
     $RawAddress = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "gui", "raw-address", "get") -QuietErrors
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "Starting SyncThing at $GuiAddress..." -ForegroundColor Cyan
+        WC "Starting SyncThing at $GuiAddress..."
         $StartArgs = @(
             "serve"
             "--home=$SyncThingHome"
@@ -744,7 +790,7 @@ function Ensure-SyncThingRunning {
         Start-Process @StartProcessArgs
         Start-Sleep -Seconds 5
     } else {
-        Write-Host "SyncThing already running at $RawAddress" -ForegroundColor Green
+        WG "SyncThing already running at $RawAddress"
     }
     $DeviceIdList = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "devices", "list") -QuietErrors
     $DeviceId = $DeviceIdList | Select-Object -First 1
@@ -786,7 +832,7 @@ function Configure-SyncThingFolders {
     $LfsPath = Join-Path $WorkspaceRoot "sync\git-lfs"
     $LfsFolderId = "$GitHubRepo-lfs"
     $LfsLabel = "$GitHubRepo Git LFS"
-    Write-Host "Configuring SyncThing folder: $LfsLabel" -ForegroundColor Cyan
+    WC "Configuring SyncThing folder: $LfsLabel"
     Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
         "config"
         "folders"
@@ -800,7 +846,7 @@ function Configure-SyncThingFolders {
     $DepotPath = Join-Path $WorkspaceRoot "sync\depot"
     $DepotFolderId = "$GitHubRepo-depot"
     $DepotLabel = "$GitHubRepo Depot"
-    Write-Host "Configuring SyncThing folder: $DepotLabel" -ForegroundColor Cyan
+    WC "Configuring SyncThing folder: $DepotLabel"
     Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
         "config"
         "folders"
@@ -809,14 +855,14 @@ function Configure-SyncThingFolders {
         "--label=$DepotLabel"
         "--path=$DepotPath"
     )
-    Write-Host "SyncThing folders configured successfully" -ForegroundColor Green
+    WG "SyncThing folders configured successfully"
 }
 
 function Update-SyncThingDevices {
     # Adds known devices to SyncThing configuration and shares folders
     param([string]$WorkspaceRoot, [array]$DeviceIds, [hashtable]$SyncThingInfo)
     if ($DeviceIds.Count -eq 0) {
-        Write-Host "No additional devices to configure" -ForegroundColor Yellow
+        WY "No additional devices to configure"
         return
     }
     $SyncThingExe = Get-SyncThingExecutable
@@ -833,7 +879,7 @@ function Update-SyncThingDevices {
     $AllKnownDeviceIds = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "devices", "list") -QuietErrors
     foreach ($DeviceId in $DeviceIds) {
         if ($DeviceId -and $AllKnownDeviceIds -notcontains $DeviceId) {
-            Write-Host "Adding SyncThing peer: $DeviceId" -ForegroundColor Green
+            WG "Adding SyncThing peer: $DeviceId"
             Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
                 "config"
                 "devices"
@@ -841,7 +887,7 @@ function Update-SyncThingDevices {
                 "--device-id=$DeviceId"
                 "--auto-accept-folders"
             )
-            Write-Host "  Sharing git-lfs folder with peer" -ForegroundColor Cyan
+            WC "  Sharing git-lfs folder with peer"
             Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
                 "config"
                 "folders"
@@ -850,7 +896,7 @@ function Update-SyncThingDevices {
                 "add"
                 "--device-id=$DeviceId"
             ) -QuietErrors
-            Write-Host "  Sharing depot folder with peer" -ForegroundColor Cyan
+            WC "  Sharing depot folder with peer"
             Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
                 "config"
                 "folders"
@@ -863,7 +909,7 @@ function Update-SyncThingDevices {
             Write-Host "Device $DeviceId already configured, skipping" -ForegroundColor Gray
         }
     }
-    Write-Host "SyncThing devices configured successfully" -ForegroundColor Green
+    WG "SyncThing devices configured successfully"
 }
 
 function Wait-ForSyncThingLfsSync {
@@ -877,7 +923,7 @@ function Wait-ForSyncThingLfsSync {
     # Get SyncThing configuration (same paths as Ensure-SyncThingRunning)
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     if (-not (Test-Path $SyncThingHome)) {
-        if (-not $Silent) { Write-Host "SyncThing not configured, skipping sync wait" -ForegroundColor Yellow }
+        if (-not $Silent) { WY "SyncThing not configured, skipping sync wait" }
         return $true
     }
 
@@ -885,28 +931,23 @@ function Wait-ForSyncThingLfsSync {
     $PortFile = Join-Path $WorkspaceRoot ".que\syncthing\gui.port"
 
     if (-not (Test-Path $ApiKeyFile) -or -not (Test-Path $PortFile)) {
-        if (-not $Silent) { Write-Host "SyncThing configuration incomplete, skipping sync wait" -ForegroundColor Yellow }
+        if (-not $Silent) { WY "SyncThing configuration incomplete, skipping sync wait" }
         return $true
     }
 
     try {
-        # Decrypt the API key (stored as SecureString)
-        $SecureString = Get-Content $ApiKeyFile | ConvertTo-SecureString
-        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
-        $ApiKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-
+        $ApiKey = Read-SecureFile $ApiKeyFile
         $Port = Get-Content $PortFile -Raw -ErrorAction Stop
         $Port = $Port.Trim()
         $GuiAddress = "127.0.0.1:$Port"
     } catch {
-        if (-not $Silent) { Write-Host "Failed to read SyncThing config, skipping sync wait" -ForegroundColor Yellow }
+        if (-not $Silent) { WY "Failed to read SyncThing config, skipping sync wait" }
         return $true
     }
 
     $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name" -ErrorAction SilentlyContinue
     if (-not $GitHubRepo) {
-        if (-not $Silent) { Write-Host "Cannot determine repository name, skipping sync wait" -ForegroundColor Yellow }
+        if (-not $Silent) { WY "Cannot determine repository name, skipping sync wait" }
         return $true
     }
 
@@ -923,13 +964,13 @@ function Wait-ForSyncThingLfsSync {
 
         # Check if folder is already in sync
         if ($Status.needBytes -eq 0 -and $Status.needDeletes -eq 0 -and $Status.needFiles -eq 0) {
-            if (-not $Silent) { Write-Host "LFS folder already in sync" -ForegroundColor Green }
+            if (-not $Silent) { WG "LFS folder already in sync" }
             return $true
         }
 
         if (-not $Silent) {
             $needMB = [math]::Round($Status.needBytes / 1MB, 2)
-            Write-Host "Waiting for SyncThing to sync LFS files ($($Status.needFiles) files, $needMB MB)..." -ForegroundColor Cyan
+            WC "Waiting for SyncThing to sync LFS files ($($Status.needFiles) files, $needMB MB)..."
         }
 
         # Wait for sync with progress bar
@@ -961,7 +1002,7 @@ function Wait-ForSyncThingLfsSync {
                 if ($Status.needBytes -eq 0 -and $Status.needDeletes -eq 0 -and $Status.needFiles -eq 0) {
                     if (-not $Silent) {
                         Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
-                        Write-Host "LFS sync complete" -ForegroundColor Green
+                        WG "LFS sync complete"
                     }
                     return $true
                 }
@@ -971,7 +1012,7 @@ function Wait-ForSyncThingLfsSync {
                 # API call failed, likely SyncThing not running
                 if (-not $Silent) {
                     Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
-                    Write-Host "SyncThing API unavailable, proceeding without sync wait" -ForegroundColor Yellow
+                    WY "SyncThing API unavailable, proceeding without sync wait"
                 }
                 return $false
             }
@@ -980,13 +1021,13 @@ function Wait-ForSyncThingLfsSync {
         # Timeout reached
         if (-not $Silent) {
             Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
-            Write-Host "Sync wait timeout reached after $TimeoutSeconds seconds" -ForegroundColor Yellow
-            Write-Host "Some LFS files may not be available yet" -ForegroundColor Yellow
+            WY "Sync wait timeout reached after $TimeoutSeconds seconds"
+            WY "Some LFS files may not be available yet"
         }
         return $false
 
     } catch {
-        if (-not $Silent) { Write-Host "Failed to check SyncThing status: $($_.Exception.Message)" -ForegroundColor Yellow }
+        if (-not $Silent) { WY "Failed to check SyncThing status: $($_.Exception.Message)" }
         return $false
     }
 }
@@ -1010,17 +1051,17 @@ function Write-UEGitConfigFiles {
     $UEGitIgnorePath = Join-Path $UProjectDir ".gitignore"
     if (-not (Test-Path $UEGitAttributesPath)) {
         Set-Content -Path $UEGitAttributesPath -Value $EmbeddedUEGitAttributes
-        Write-Host "Created UE .gitattributes at: $UEGitAttributesPath" -ForegroundColor Green
+        WG "Created UE .gitattributes at: $UEGitAttributesPath"
     }
     if (-not (Test-Path $UEGitIgnorePath)) {
         Set-Content -Path $UEGitIgnorePath -Value $EmbeddedUEGitIgnore
-        Write-Host "Created UE .gitignore at: $UEGitIgnorePath" -ForegroundColor Green
+        WG "Created UE .gitignore at: $UEGitIgnorePath"
     }
 }
 
 function Install-AllDependencies {
     # Installs all dependencies required for Unreal Engine 5.7 development
-    Write-Host "`nInstalling prerequisites for Unreal Engine 5.7..." -ForegroundColor Cyan
+    WC "`nInstalling prerequisites for Unreal Engine 5.7..."
     Sync-WingetPackage -PackageName 'Git.Git'
     Sync-WingetPackage -PackageName 'Git.GCM'
     Sync-WingetPackage -PackageName 'EpicGames.EpicGamesLauncher'
@@ -1051,27 +1092,27 @@ function Install-AllDependencies {
         ) -join ' '
     }
     Sync-WingetPackage @VSBuildToolsParams
-    Write-Host "`nDependencies installed successfully" -ForegroundColor Green
-    Write-Host "`nChecking Unreal Engine 5.7 installation..." -ForegroundColor Cyan
+    WG "`nDependencies installed successfully"
+    WC "`nChecking Unreal Engine 5.7 installation..."
     $UEInstallPath = $null
     $UERegistryPath = "HKLM:\Software\EpicGames\Unreal Engine\5.7"
     if (Test-Path $UERegistryPath) {
         $UEInstallPath = (Get-ItemProperty -Path $UERegistryPath -Name "InstalledDirectory" -ErrorAction SilentlyContinue).InstalledDirectory
     }
     if ($UEInstallPath -and (Test-Path $UEInstallPath)) {
-        Write-Host "Unreal Engine 5.7 is installed at: $UEInstallPath" -ForegroundColor Green
+        WG "Unreal Engine 5.7 is installed at: $UEInstallPath"
     } else {
-        Write-Host "Unreal Engine 5.7 is not installed." -ForegroundColor Yellow
-        Write-Host "Please install it using the Epic Games Launcher" -ForegroundColor Yellow
+        WY "Unreal Engine 5.7 is not installed."
+        WY "Please install it using the Epic Games Launcher"
         $LauncherPath = Get-EpicGamesLauncherExecutable
         if ($LauncherPath) {
             Write-Host "Launching Epic Games Launcher from: $LauncherPath" -ForegroundColor Gray
             Start-Process $LauncherPath -ArgumentList "-openueversion=5.7"
         } else {
             Write-Warning "Could not locate Epic Games Launcher executable"
-            Write-Host "Please open Epic Games Launcher manually and install Unreal Engine 5.7" -ForegroundColor Yellow
+            WY "Please open Epic Games Launcher manually and install Unreal Engine 5.7"
         }
-        Write-Host "Continuing setup (UE will be required before opening the project)..." -ForegroundColor Yellow
+        WY "Continuing setup (UE will be required before opening the project)..."
     }
 }
 
@@ -1114,7 +1155,7 @@ $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
     $ScriptContent = $ScriptContent -replace ('<#{0}QUE_MANAGEMENT_MODE_BEGIN{0}' -f @($ThreeHashes)), ''
     $ScriptContent = $ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes)), ''
     Set-Content -Path $OutputPath -Value $ScriptContent
-    Write-Host "Generated: $OutputPath" -ForegroundColor Green
+    WG "Generated: $OutputPath"
 }
 
 # Workspace Creation Functions
@@ -1123,7 +1164,7 @@ function New-QueWorkspace {
     # Creates a new QUE workspace with initialization modes: blank, from GitHub, from local repo
     param([string]$GitHubOwner, [string]$GitHubRepo, [string]$PlainPAT, [object]$UserInfo)
     $WorkspaceRoot = (Get-Location).Path
-    Write-Host "`nCreating QUE workspace for $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
+    WC "`nCreating QUE workspace for $GitHubOwner/$GitHubRepo..."
     Write-Host "`nCreating workspace structure..."
     New-Item -ItemType Directory -Force -Path ".que" | Out-Null
     New-Item -ItemType Directory -Force -Path ".que/repo" | Out-Null
@@ -1142,7 +1183,7 @@ function New-QueWorkspace {
         $RepoUrl = "https://api.github.com/repos/$GitHubOwner/$GitHubRepo"
         $Response = Invoke-WebRequest -UseBasicParsing -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
         $RepoExists = $true
-        Write-Host "`nRepository $GitHubOwner/$GitHubRepo already exists on GitHub" -ForegroundColor Green
+        WG "`nRepository $GitHubOwner/$GitHubRepo already exists on GitHub"
     } catch {
         if ($_.Exception.Response.StatusCode -eq 404) {
             $RepoExists = $false
@@ -1155,11 +1196,20 @@ function New-QueWorkspace {
     # Determine initialization mode
     $ShouldClone = $false
     $InitMode = 0  # 0 = blank, 1 = from other GitHub repo, 2 = from local, 3 = as part of existing GitHub repo
+    $RepoIsEmpty = $false
     if ($RepoExists) {
-        $ShouldClone = $true
-        $InitMode = 3
+        $RepoIsEmpty = Test-GitHubRepoEmpty -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT
+        if ($RepoIsEmpty) {
+            WY "Repository exists but is empty. Proceeding with blank project initialization."
+            $ShouldClone = $false
+            $InitMode = 0
+        } else {
+            WG "`nRepository $GitHubOwner/$GitHubRepo already exists. Cloning it for this workspace..."
+            $ShouldClone = $true
+            $InitMode = 3
+        }
     } else {
-        Write-Host "`nSelect initialization method:" -ForegroundColor Yellow
+        WY "`nSelect initialization method:"
         $Options = @(
             "Create a blank project",
             "Create from existing GitHub project URL",
@@ -1189,40 +1239,24 @@ function New-QueWorkspace {
                 $CopyFromLocal = $LocalRepoPath
             }
         }
-        # Create new repo on GitHub first
-        Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
-        try {
-            $CreateRepoBody = @{
-                name = $GitHubRepo
-                private = $true
-                auto_init = $false
-            } | ConvertTo-Json
-            $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
-                "https://api.github.com/user/repos"
-            } else {
-                "https://api.github.com/orgs/$GitHubOwner/repos"
-            }
-            Invoke-WebRequest -UseBasicParsing -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
-            Write-Host "Repository created successfully" -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to create repository: $($_.Exception.Message)"
-            Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $GitHubOwner"
-            return
-        }
+        Write-Host "`nRepository will be created later in the setup process." -ForegroundColor Gray
     }
     Install-AllDependencies
-    Write-Host "`nInitializing SyncThing..." -ForegroundColor Cyan
+    WC "`nInitializing SyncThing..."
     $SyncThingInfo = Initialize-SyncThing -WorkspaceRoot $WorkspaceRoot
-    Write-Host "`nCreating first clone..." -ForegroundColor Cyan
+    WC "`nCreating first clone..."
     $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone $true -ShouldClone $ShouldClone -UserInfo $UserInfo -PlainPAT $PlainPAT -SyncThingInfo $SyncThingInfo
     # Handle special initialization modes
     if ($InitMode -eq 0) {
-        Write-Host "`nBlank project workspace created" -ForegroundColor Green
-        Write-Host "Next steps:" -ForegroundColor Cyan
-        Write-Host "  1. Create your Unreal Engine project in: $CloneRoot" -ForegroundColor White
-        Write-Host "  2. Add and commit your files with git" -ForegroundColor White
-        Write-Host "  3. Push to GitHub when ready" -ForegroundColor White
+        WG "`nBlank project workspace created"
+        WC "Next steps:"
+        WW "  1. Create your Unreal Engine project in: $CloneRoot"
+        WW "  2. Add and commit your files with git"
+        WW "  3. Push to GitHub when ready"
     } elseif ($InitMode -eq 1 -and $CloneFromSource) {
+        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+            return
+        }
         Push-Location $CloneRoot
         git remote add source $CloneFromSource 2>&1 | ForEach-Object { "$_" } | Out-Host
         git fetch source 2>&1 | ForEach-Object { "$_" } | Out-Host
@@ -1230,28 +1264,44 @@ function New-QueWorkspace {
         git push origin main 2>&1 | ForEach-Object { "$_" } | Out-Host
         git remote remove source 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
-        Write-Host "Imported from source repository into $CloneRoot" -ForegroundColor Green
+        WG "Imported from source repository into $CloneRoot"
     } elseif ($InitMode -eq 2 -and $CopyFromLocal) {
         $SourceFiles = Get-ChildItem $CopyFromLocal -Exclude ".git" -Force
         foreach ($File in $SourceFiles) {
             Copy-Item $File.FullName -Destination $CloneRoot -Recurse -Force
+        }
+        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+            return
         }
         Push-Location $CloneRoot
         git add -A 2>&1 | ForEach-Object { "$_" } | Out-Host
         git commit -m "Import from local repository" 2>&1 | ForEach-Object { "$_" } | Out-Host
         git push origin main 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
-        Write-Host "Imported from local repository into $CloneRoot" -ForegroundColor Green
+        WG "Imported from local repository into $CloneRoot"
     } elseif ($InitMode -eq 3) {
         # Wait for SyncThing to sync LFS files before pulling
         Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
         Push-Location $CloneRoot
         git pull 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
-        Write-Host "Pulled latest from repository into $CloneRoot" -ForegroundColor Green
+        WG "Pulled latest from repository into $CloneRoot"
+    }
+    $ProjectScriptPath = Join-Path $CloneRoot "que57-project.ps1"
+    if (-not (Test-Path $ProjectScriptPath)) {
+        if (Test-Path variable:queScript -and $queScript) {
+            WY "que57-project.ps1 missing; generating now..."
+            $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
+            New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+        }
+    }
+    if (-not (Test-Path $ProjectScriptPath)) {
+        Write-Error "Workspace creation incomplete: que57-project.ps1 is missing in $CloneRoot"
+        WY "Fix the repository or rerun the setup to generate que57-project.ps1 before continuing."
+        return
     }
     Set-Content -Path ".que/workspace-version" -Value "1"
-    Write-Host "`nWorkspace created successfully!" -ForegroundColor Green
+    WG "`nWorkspace created successfully!"
 }
 
 function New-QueClone {
@@ -1277,14 +1327,14 @@ function New-QueClone {
         }
     }
     if (-not $SyncThingInfo) {
-        Write-Host "Ensuring SyncThing is running..." -ForegroundColor Cyan
+        WC "Ensuring SyncThing is running..."
         $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
     }
     if (-not $CloneName) {
         $CloneName = Get-NextCloneName -WorkspaceRoot $WorkspaceRoot
     }
     $CloneRoot = Join-Path $WorkspaceRoot "repo\$CloneName"
-    Write-Host "Creating clone: $CloneName" -ForegroundColor Cyan
+    WC "Creating clone: $CloneName"
     New-Item -ItemType Directory -Force -Path $CloneRoot | Out-Null
     $CloneMetaPath = "$WorkspaceRoot\.que\repo\$CloneName"
     New-Item -ItemType Directory -Force -Path $CloneMetaPath | Out-Null
@@ -1293,7 +1343,7 @@ function New-QueClone {
         if (-not (Test-Path $SourcePath)) {
             throw "Source path not found: $SourcePath"
         }
-        Write-Host "Cloning from existing workspace state at $SourcePath..." -ForegroundColor Cyan
+        WC "Cloning from existing workspace state at $SourcePath..."
         $PreviousGitLfsSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
         $env:GIT_LFS_SKIP_SMUDGE = '1'
         Push-Location $CloneRoot
@@ -1313,16 +1363,12 @@ function New-QueClone {
             Remove-Item env:GIT_LFS_SKIP_SMUDGE -ErrorAction SilentlyContinue
         }
         git remote set-url origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
-        git config --local user.name $UserInfo.name
-        git config --local user.email ("{0}-{1}@users.noreply.github.com" -f @($UserInfo.id, $UserInfo.login))
-        git config --local credential.username $UserInfo.login
-        git config --local lfs.locksverify false
-        git config --local push.autoSetupRemote true
+        Set-QueGitConfig $UserInfo
         Pop-Location
-        Write-Host "Clone complete. LFS pointer files created (objects will sync via SyncThing)" -ForegroundColor Yellow
+        WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
     } elseif ($ShouldClone) {
-        Write-Host "Cloning $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
+        WC "Cloning $GitHubOwner/$GitHubRepo..."
         $PreviousGitLfsSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
         $env:GIT_LFS_SKIP_SMUDGE = '1'
         Push-Location $CloneRoot
@@ -1337,36 +1383,80 @@ function New-QueClone {
             Remove-Item env:GIT_LFS_SKIP_SMUDGE -ErrorAction SilentlyContinue
         }
         Pop-Location
-        Write-Host "Clone complete. LFS pointer files created (objects will sync via SyncThing)" -ForegroundColor Yellow
+        WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
         Push-Location $CloneRoot
-        git config --local user.name $UserInfo.name
-        git config --local user.email ("{0}-{1}@users.noreply.github.com" -f @($UserInfo.id, $UserInfo.login))
-        git config --local credential.username $UserInfo.login
-        git config --local lfs.locksverify false
-        git config --local push.autoSetupRemote true
+        Set-QueGitConfig $UserInfo
         Pop-Location
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
+        $ProjectScriptPath = "$CloneRoot\que57-project.ps1"
+        $RepoHasCommits = $true
+        Push-Location $CloneRoot
+        git rev-parse --verify HEAD 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { $RepoHasCommits = $false }
+        Pop-Location
+        if (-not $RepoHasCommits) {
+            WY "Repository is empty. Initializing default QUE files..."
+            Write-GitConfigFiles -CloneRoot $CloneRoot
+            $ReadmeContent = $EmbeddedReadme -replace '{{OWNER}}', $GitHubOwner -replace '{{REPO}}', $GitHubRepo
+            Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
+            if (-not (Test-Path $ProjectScriptPath)) {
+                WC "Generating que57-project.ps1..."
+                $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
+                if (Test-Path variable:queScript -and $queScript) {
+                    New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+                } else {
+                    Write-Warning "Cannot generate que57-project.ps1 (bootstrap script not available)."
+                }
+            }
+            Push-Location $CloneRoot
+            git add . 2>&1 | ForEach-Object { "$_" } | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                throw "git add failed"
+            }
+            git commit -m "Initial commit: QUE workspace setup" 2>&1 | ForEach-Object { "$_" } | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                throw "git commit failed"
+            }
+            git push -u origin main 2>&1 | ForEach-Object { "$_" } | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                throw "git push failed"
+            }
+            Pop-Location
+            WG "`nRepository initialized and pushed to GitHub!"
+            WY "After creating the .uproject file, the UE git config files will be auto-generated."
+        } elseif (-not (Test-Path $ProjectScriptPath)) {
+            if (Test-Path variable:queScript -and $queScript) {
+                WY "que57-project.ps1 missing; generating from bootstrap script..."
+                $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
+                New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+                WY "Please commit and push que57-project.ps1 to share with your team."
+            } else {
+                Write-Warning "que57-project.ps1 missing and cannot be generated (bootstrap script not available)."
+            }
+        }
     } else {
-        Write-Host "Initializing new repository..." -ForegroundColor Cyan
+        WC "Initializing new repository..."
         Push-Location $CloneRoot
         git init -b main 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             throw "git init failed"
         }
-        git config --local user.name $UserInfo.name
-        git config --local user.email ("{0}-{1}@users.noreply.github.com" -f @($UserInfo.id, $UserInfo.login))
-        git config --local credential.username $UserInfo.login
-        git config --local lfs.locksverify false
-        git config --local push.autoSetupRemote true
+        Set-QueGitConfig $UserInfo
         git remote add origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
         Write-GitConfigFiles -CloneRoot $CloneRoot
         $ReadmeContent = $EmbeddedReadme -replace '{{OWNER}}', $GitHubOwner -replace '{{REPO}}', $GitHubRepo
         Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
-        Write-Host "Generating que57-project.ps1..." -ForegroundColor Cyan
+        WC "Generating que57-project.ps1..."
         $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
         New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+            return
+        }
         Push-Location $CloneRoot
         git add . 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
@@ -1384,8 +1474,8 @@ function New-QueClone {
             throw "git push failed"
         }
         Pop-Location
-        Write-Host "`nRepository initialized and pushed to GitHub!" -ForegroundColor Green
-        Write-Host "After creating the .uproject file, the UE git config files will be auto-generated." -ForegroundColor Yellow
+        WG "`nRepository initialized and pushed to GitHub!"
+        WY "After creating the .uproject file, the UE git config files will be auto-generated."
     }
     Push-Location $CloneRoot
     git lfs install --local 2>&1 | ForEach-Object { "$_" } | Out-Host
@@ -1395,9 +1485,45 @@ function New-QueClone {
     $ShortcutPath = "$WorkspaceRoot\open-$CloneName.lnk"
     $TargetScript = "$CloneRoot\que57-project.ps1"
     New-WindowsShortcut -ShortcutPath $ShortcutPath -TargetScript $TargetScript
-    Write-Host "Created shortcut: $ShortcutPath" -ForegroundColor Green
+    WG "Created shortcut: $ShortcutPath"
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"
+    Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -CloneName $CloneName -SkipIfDirty:$false
     return $CloneRoot
+}
+
+# Ensures a clone stays on its own work branch (que/<clone>) when safe to do so.
+function Ensure-QueCloneOnWorkBranch {
+    param([string]$CloneRoot, [string]$CloneName, [switch]$SkipIfDirty = $true)
+    if (-not $CloneRoot -or -not $CloneName) { return }
+    $WorkBranch = "que/$CloneName"
+    Push-Location $CloneRoot
+    try {
+        # Capture exit code before piping to avoid PowerShell quirk where pipe corrupts $LASTEXITCODE
+        $BranchOutput = git rev-parse --abbrev-ref HEAD 2>$null
+        $RevParseExit = $LASTEXITCODE
+        $CurrentBranch = $BranchOutput | Select-Object -First 1
+        if ($RevParseExit -ne 0 -or -not $CurrentBranch) { return }
+        if ($CurrentBranch -eq $WorkBranch) { return }
+        if ($SkipIfDirty) {
+            $Status = git status --porcelain 2>$null
+            if ($LASTEXITCODE -eq 0 -and $Status) { return }
+        }
+        $null = git show-ref --verify "refs/heads/$WorkBranch" 2>$null
+        $BranchExists = $LASTEXITCODE -eq 0
+        if ($BranchExists) {
+            git checkout $WorkBranch 2>&1 | Out-Null
+        } else {
+            git checkout -b $WorkBranch 2>&1 | Out-Null
+        }
+        $FinalOutput = git rev-parse --abbrev-ref HEAD 2>$null
+        $FinalExit = $LASTEXITCODE
+        $FinalBranch = $FinalOutput | Select-Object -First 1
+        if ($FinalExit -ne 0 -or $FinalBranch -ne $WorkBranch) {
+            Write-Warning "Failed to switch clone to work branch $WorkBranch"
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 # ----------------------------------------------------------------------------
@@ -1474,7 +1600,7 @@ function Invoke-QuePushWithRetry {
         if ($Attempt -eq $MaxAttempts) {
             throw "Push failed after $MaxAttempts attempts.`n$($PushResult.Output -join "`n")"
         }
-        Write-Host "Push rejected; merging origin/$($script:QueMainBranch) then retrying (attempt $($Attempt + 1) of $MaxAttempts)..." -ForegroundColor Yellow
+        WY "Push rejected; merging origin/$($script:QueMainBranch) then retrying (attempt $($Attempt + 1) of $MaxAttempts)..."
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch)
         Invoke-QueMerge -CloneRoot $CloneRoot -Source ("origin/{0}" -f $script:QueMainBranch) -Message ("que: merge origin/{0}" -f $script:QueMainBranch)
         Start-Sleep -Seconds $DelaySeconds
@@ -1554,7 +1680,7 @@ function Invoke-QueLoadCommand {
         if ((-not $SkipLaunch) -and (Test-Path $ShortcutPath)) {
             Start-Process -FilePath $ShortcutPath | Out-Null
         } else {
-            Write-Host "Found existing clone for $BranchName at $ExistingCloneRoot" -ForegroundColor Green
+            WG "Found existing clone for $BranchName at $ExistingCloneRoot"
         }
         return $ExistingCloneRoot
     }
@@ -1571,14 +1697,14 @@ function Invoke-QueLoadCommand {
         $CurrentBranchName = if ($CurrentBranch.ExitCode -eq 0) { $CurrentBranch.Output | Select-Object -First 1 } else { "(unknown)" }
         throw "Clone path already exists at $TargetClonePath (current branch: $CurrentBranchName). Please open that clone or choose a different branch name."
     }
-    Write-Host "Loading $BranchName into a new clone..." -ForegroundColor Cyan
+    WC "Loading $BranchName into a new clone..."
     $CloneRoot = Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $Name -SkipLaunch
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $BranchName) | Out-Null
     $SwitchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", "-c", $BranchName, "--track", "origin/$BranchName") -AllowFailure
     if ($SwitchResult.ExitCode -ne 0) {
         throw "Failed to switch clone to $BranchName.`n$($SwitchResult.Output -join "`n")"
     }
-    Write-Host "Loaded $BranchName into clone $(Split-Path $CloneRoot -Leaf)" -ForegroundColor Green
+    WG "Loaded $BranchName into clone $(Split-Path $CloneRoot -Leaf)"
     $ShortcutPath = Join-Path $WorkspaceRoot "open-$((Split-Path $CloneRoot -Leaf)).lnk"
     if ((-not $SkipLaunch) -and (Test-Path $ShortcutPath)) {
         Start-Process -FilePath $ShortcutPath | Out-Null
@@ -1600,7 +1726,7 @@ function Invoke-QueImportCommand {
         throw "Work branch $SourceBranch not found on origin."
     }
     Invoke-QueMerge -CloneRoot $CloneRoot -Source ("origin/$SourceBranch") -Message ("que: import {0}" -f $SourceBranch) | Out-Null
-    Write-Host "Imported $SourceBranch into $CurrentBranch" -ForegroundColor Green
+    WG "Imported $SourceBranch into $CurrentBranch"
 }
 
 function Invoke-QueUpdateCommand {
@@ -1636,7 +1762,7 @@ function Invoke-QueRenameCommand {
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("branch", "-m", $NewBranch) | Out-Null
     Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $NewBranch | Out-Null
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "origin", ":$OldBranch") -AllowFailure | Out-Null
-    Write-Host "Renamed $OldBranch to $NewBranch locally and on origin." -ForegroundColor Green
+    WG "Renamed $OldBranch to $NewBranch locally and on origin."
     return $NewBranch
 }
 
@@ -1654,7 +1780,7 @@ function Invoke-QueResetCommand {
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $script:QueMainBranch) | Out-Null
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch) | Out-Null
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("reset", "--hard", "origin/$($script:QueMainBranch)") | Out-Null
-    Write-Host "Reset to origin/$($script:QueMainBranch). Local changes stashed." -ForegroundColor Green
+    WG "Reset to origin/$($script:QueMainBranch). Local changes stashed."
 }
 
 function Invoke-QuePublishCommand {
@@ -1673,30 +1799,30 @@ function Invoke-QuePublishCommand {
     Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $script:QueMainBranch | Out-Null
 
     # Push LFS objects to GitHub for disaster recovery
-    Write-Host "Publishing LFS files to GitHub for backup..." -ForegroundColor Cyan
+    WC "Publishing LFS files to GitHub for backup..."
     Push-Location $CloneRoot
     try {
         # Check if there are any LFS files to push
         $LfsFiles = git lfs ls-files 2>&1
         if ($LASTEXITCODE -eq 0 -and $LfsFiles) {
-            Write-Host "Uploading LFS objects to GitHub (this provides disaster recovery)..." -ForegroundColor Yellow
+            WY "Uploading LFS objects to GitHub (this provides disaster recovery)..."
             git lfs push --all origin 2>&1 | ForEach-Object {
                 if ($_ -match "Uploading|Upload|Counting|^Git LFS:") {
                     Write-Host "  $_" -ForegroundColor Gray
                 }
             }
             if ($LASTEXITCODE -eq 0) {
-                Write-Host "LFS objects backed up to GitHub successfully" -ForegroundColor Green
+                WG "LFS objects backed up to GitHub successfully"
             } else {
-                Write-Host "Warning: LFS push encountered issues (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
-                Write-Host "Pointer files were published, but some LFS objects may not be backed up to GitHub" -ForegroundColor Yellow
+                WY "Warning: LFS push encountered issues (exit code: $LASTEXITCODE)"
+                WY "Pointer files were published, but some LFS objects may not be backed up to GitHub"
             }
         } else {
             Write-Host "No LFS files to back up" -ForegroundColor Gray
         }
     } catch {
-        Write-Host "Warning: Failed to push LFS objects: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "Continuing - pointer files were published successfully" -ForegroundColor Yellow
+        WY "Warning: Failed to push LFS objects: $($_.Exception.Message)"
+        WY "Continuing - pointer files were published successfully"
     } finally {
         Pop-Location
     }
@@ -1704,14 +1830,14 @@ function Invoke-QuePublishCommand {
     if ($TagName) {
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("tag", "-f", $TagName) | Out-Null
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "-f", "origin", $TagName) | Out-Null
-        Write-Host "Moved tag $TagName to $script:QueMainBranch and pushed." -ForegroundColor Green
+        WG "Moved tag $TagName to $script:QueMainBranch and pushed."
     }
     return $WorkBranch
 }
 
 function Invoke-QueNewCommand {
     param([string]$WorkspaceRoot, [string]$CloneName = $null, [switch]$SkipLaunch = $false)
-    Write-Host "Creating new clone from origin/$($script:QueMainBranch)..." -ForegroundColor Cyan
+    WC "Creating new clone from origin/$($script:QueMainBranch)..."
     $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone:$false -ShouldClone:$true -CloneName $CloneName
     $Name = Split-Path $CloneRoot -Leaf
     $ShortcutPath = Join-Path $WorkspaceRoot "open-$Name.lnk"
@@ -1726,7 +1852,7 @@ function Invoke-QueCloneCommand {
     if (-not $SourceCloneRoot) {
         throw "A source clone path is required for 'que clone'."
     }
-    Write-Host "Cloning current branch state into a new workspace clone..." -ForegroundColor Cyan
+    WC "Cloning current branch state into a new workspace clone..."
     $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone:$false -CloneName $CloneName -SourcePath $SourceCloneRoot
     $Name = Split-Path $CloneRoot -Leaf
     $ShortcutPath = Join-Path $WorkspaceRoot "open-$Name.lnk"
@@ -1778,12 +1904,12 @@ function Invoke-UnrealGenerate {
     param([string]$UProjectPath)
     $UBTPath = Get-UnrealBuildTool -UProjectPath $UProjectPath
     $ProjectDir = Split-Path $UProjectPath -Parent
-    Write-Host "Generating project files..." -ForegroundColor Cyan
+    WC "Generating project files..."
     & $UBTPath -Mode=GenerateProjectFiles -Project="$UProjectPath" -Silent
     if ($LASTEXITCODE -ne 0) {
         throw "Project file generation failed with exit code $LASTEXITCODE"
     }
-    Write-Host "Project files generated successfully" -ForegroundColor Green
+    WG "Project files generated successfully"
 }
 
 function Invoke-UnrealBuild {
@@ -1794,13 +1920,13 @@ function Invoke-UnrealBuild {
     if (-not (Test-Path $BuildBatchFile)) {
         throw "Build.bat not found at: $BuildBatchFile"
     }
-    Write-Host "Building $ProjectName Editor (Development Win64)..." -ForegroundColor Cyan
+    WC "Building $ProjectName Editor (Development Win64)..."
     & $BuildBatchFile "${ProjectName}Editor" Win64 Development "-Project=`"$UProjectPath`"" -Progress -NoEngineChanges -NoHotReloadFromIDE
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Build failed with exit code $LASTEXITCODE"
         return $false
     }
-    Write-Host "Build completed successfully" -ForegroundColor Green
+    WG "Build completed successfully"
     return $true
 }
 
@@ -1811,9 +1937,9 @@ function Invoke-UnrealEditor {
     if (-not (Test-Path $EditorPath)) {
         throw "UnrealEditor.exe not found at: $EditorPath"
     }
-    Write-Host "Launching Unreal Editor..." -ForegroundColor Cyan
+    WC "Launching Unreal Editor..."
     Start-Process -FilePath $EditorPath -ArgumentList "`"$UProjectPath`"" -WorkingDirectory (Split-Path $UProjectPath -Parent)
-    Write-Host "Editor launched" -ForegroundColor Green
+    WG "Editor launched"
 }
 
 function Invoke-UnrealClean {
@@ -1824,10 +1950,10 @@ function Invoke-UnrealClean {
         $EngineDir = Get-UnrealEngineDirectory -UProjectPath $UProjectPath
         $CleanBatchFile = Join-Path $EngineDir "Engine\Build\BatchFiles\Clean.bat"
         if (Test-Path $CleanBatchFile) {
-            Write-Host "Running Clean.bat..." -ForegroundColor Cyan
+            WC "Running Clean.bat..."
             & $CleanBatchFile $ProjectName Win64 Development
             if ($LASTEXITCODE -eq 0) {
-                Write-Host "Clean completed successfully" -ForegroundColor Green
+                WG "Clean completed successfully"
                 return
             }
             Write-Warning "Clean.bat failed, falling back to manual cleanup"
@@ -1835,21 +1961,21 @@ function Invoke-UnrealClean {
     } catch {
         Write-Warning "Could not run Clean.bat: $($_.Exception.Message)"
     }
-    Write-Host "Performing manual cleanup..." -ForegroundColor Cyan
+    WC "Performing manual cleanup..."
     $FoldersToDelete = @("Binaries", "Intermediate", "Saved", "DerivedDataCache")
     foreach ($Folder in $FoldersToDelete) {
         $FolderPath = Join-Path $ProjectDir $Folder
         if (Test-Path $FolderPath) {
-            Write-Host "Deleting $Folder..." -ForegroundColor Yellow
+            WY "Deleting $Folder..."
             Remove-Item $FolderPath -Recurse -Force
         }
     }
     $SlnFiles = Get-ChildItem -Path (Split-Path $ProjectDir -Parent) -Filter "*.sln" -ErrorAction SilentlyContinue
     foreach ($SlnFile in $SlnFiles) {
-        Write-Host "Deleting $($SlnFile.Name)..." -ForegroundColor Yellow
+        WY "Deleting $($SlnFile.Name)..."
         Remove-Item $SlnFile.FullName -Force
     }
-    Write-Host "Clean completed. Next build will be a full rebuild." -ForegroundColor Green
+    WG "Clean completed. Next build will be a full rebuild."
 }
 
 function Invoke-UnrealPackage {
@@ -1861,10 +1987,10 @@ function Invoke-UnrealPackage {
     if (-not (Test-Path $RunUATPath)) {
         throw "RunUAT.bat not found at: $RunUATPath"
     }
-    Write-Host "`nSelect build configuration:" -ForegroundColor Yellow
-    Write-Host "1. Development" -ForegroundColor White
-    Write-Host "2. Shipping" -ForegroundColor White
-    Write-Host "3. DebugGame" -ForegroundColor White
+    WY "`nSelect build configuration:"
+    WW "1. Development"
+    WW "2. Shipping"
+    WW "3. DebugGame"
     $Selection = Read-Host "Enter selection (1-3)"
     $BuildConfig = switch ($Selection) {
         "1" { "Development" }
@@ -1875,8 +2001,8 @@ function Invoke-UnrealPackage {
             "Development"
         }
     }
-    Write-Host "Using configuration: $BuildConfig" -ForegroundColor Green
-    Write-Host "`nPackaging client build ($BuildConfig)..." -ForegroundColor Cyan
+    WG "Using configuration: $BuildConfig"
+    WC "`nPackaging client build ($BuildConfig)..."
     & $RunUATPath BuildCookRun `
         -project="$UProjectPath" `
         -nop4 `
@@ -1892,7 +2018,7 @@ function Invoke-UnrealPackage {
     if ($LASTEXITCODE -ne 0) {
         throw "Client package failed with exit code $LASTEXITCODE"
     }
-    Write-Host "`nPackaging server build ($BuildConfig)..." -ForegroundColor Cyan
+    WC "`nPackaging server build ($BuildConfig)..."
     & $RunUATPath BuildCookRun `
         -project="$UProjectPath" `
         -nop4 `
@@ -1919,7 +2045,7 @@ function Invoke-UnrealPackage {
 
 function Open-UnrealProject {
     param([string]$CloneRoot)
-    Write-Host "`nOpening Unreal Engine project..." -ForegroundColor Cyan
+    WC "`nOpening Unreal Engine project..."
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
         Write-Error "No .uproject file found. Please create your Unreal project first."
@@ -1946,7 +2072,7 @@ function Open-UnrealProject {
     Write-Host "Launching Unreal Editor..."
     try {
         Invoke-UnrealEditor -UProjectPath $UProjectPath
-        Write-Host "Editor launched successfully!" -ForegroundColor Green
+        WG "Editor launched successfully!"
     } catch {
         Write-Error "Failed to launch editor: $($_.Exception.Message)"
     }
@@ -1954,7 +2080,7 @@ function Open-UnrealProject {
 
 function Build-UnrealProject {
     param([string]$CloneRoot)
-    Write-Host "`nBuilding Unreal Engine project..." -ForegroundColor Cyan
+    WC "`nBuilding Unreal Engine project..."
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
         Write-Error "No .uproject file found."
@@ -1971,7 +2097,7 @@ function Build-UnrealProject {
     try {
         $BuildSuccess = Invoke-UnrealBuild -UProjectPath $UProjectPath
         if ($BuildSuccess) {
-            Write-Host "Build completed successfully!" -ForegroundColor Green
+            WG "Build completed successfully!"
         } else {
             Write-Error "Build failed."
         }
@@ -1982,7 +2108,7 @@ function Build-UnrealProject {
 
 function Clean-UnrealProject {
     param([string]$CloneRoot)
-    Write-Host "`nCleaning Unreal Engine project..." -ForegroundColor Cyan
+    WC "`nCleaning Unreal Engine project..."
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
         Write-Error "No .uproject file found."
@@ -1997,7 +2123,7 @@ function Clean-UnrealProject {
 
 function Package-UnrealProject {
     param([string]$CloneRoot)
-    Write-Host "`nPackaging Unreal Engine project..." -ForegroundColor Cyan
+    WC "`nPackaging Unreal Engine project..."
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if (-not $UProjectPath) {
         Write-Error "No .uproject file found."
@@ -2006,7 +2132,7 @@ function Package-UnrealProject {
     try {
         $PackageResult = Invoke-UnrealPackage -UProjectPath $UProjectPath
         if ($PackageResult) {
-            Write-Host "`nPackaging complete ($($PackageResult.Configuration))!" -ForegroundColor Green
+            WG "`nPackaging complete ($($PackageResult.Configuration))!"
             if ($PackageResult.Client) {
                 Write-Host "Client package: $($PackageResult.Client)"
             }
@@ -2021,30 +2147,48 @@ function Package-UnrealProject {
 
 function Open-SyncThingBrowser {
     param([string]$WorkspaceRoot)
-    $SyncThingHome = "$WorkspaceRoot\.que\syncthing"
+    $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
+    if (-not $SyncThingInfo) {
+        Write-Host "SyncThing is not available" -ForegroundColor Red
+        return
+    }
     $SyncThingExe = Get-SyncThingExecutable
     if (-not $SyncThingExe) {
         Write-Host "SyncThing executable not found" -ForegroundColor Red
         return
     }
-    & $SyncThingExe browser --home="$SyncThingHome"
+    $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
+    $GuiAddress = $SyncThingInfo.GuiAddress
+    $ApiKey = $SyncThingInfo.ApiKey
+    $RawAddress = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "gui", "raw-address", "get") -QuietErrors
+    $RawAddress = $RawAddress | Select-Object -First 1
+    if ($RawAddress) {
+        $RawAddress = $RawAddress.Trim()
+    }
+    if (-not $RawAddress) {
+        $RawAddress = $GuiAddress
+    }
+    if ($RawAddress -notmatch '^https?://') {
+        $RawAddress = "http://$RawAddress"
+    }
+    Start-Process $RawAddress
 }
 
 function Show-WorkspaceInfo {
     param([string]$WorkspaceRoot, [string]$CloneRoot)
     $CloneName = Split-Path $CloneRoot -Leaf
-    Write-Host "`n===============================================================" -ForegroundColor Cyan
-    Write-Host "  QUE Workspace Information" -ForegroundColor Green
-    Write-Host "===============================================================" -ForegroundColor Cyan
-    Write-Host "`nWorkspace:" -ForegroundColor Yellow
+    WC "`n==============================================================="
+    WG "  QUE Workspace Information"
+    WC "==============================================================="
+    WY "`nWorkspace:"
     Write-Host "  Root: $WorkspaceRoot"
     Write-Host "  Version: $(Get-Content "$WorkspaceRoot\.que\workspace-version" -ErrorAction SilentlyContinue)"
-    Write-Host "`nClone:" -ForegroundColor Yellow
+    WY "`nClone:"
     Write-Host "  Name: $CloneName"
     Write-Host "  Root: $CloneRoot"
     $RepoVersion = Get-Content "$WorkspaceRoot\.que\repo\$CloneName\repo-version" -ErrorAction SilentlyContinue
     Write-Host "  Version: $(if ($RepoVersion) { $RepoVersion } else { 'Not set' })"
-    Write-Host "`nGitHub:" -ForegroundColor Yellow
+    WY "`nGitHub:"
     Write-Host "  Repository: $script:GitHubOwner/$script:GitHubRepo"
     Push-Location $CloneRoot
     $GitUser = git config user.name
@@ -2062,14 +2206,14 @@ function Show-WorkspaceInfo {
     Pop-Location
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if ($UProjectPath) {
-        Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
+        WY "`nUnreal Engine:"
         Write-Host "  Project: $UProjectPath"
         Write-Host "  Version: $script:UnrealEngineVersion"
     } else {
-        Write-Host "`nUnreal Engine:" -ForegroundColor Yellow
+        WY "`nUnreal Engine:"
         Write-Host "  No .uproject file found"
     }
-    Write-Host "`nSyncThing:" -ForegroundColor Yellow
+    WY "`nSyncThing:"
     $SyncThingRunning = Get-Process syncthing -ErrorAction SilentlyContinue
     if ($SyncThingRunning) {
         Write-Host "  Status: Running"
@@ -2080,12 +2224,12 @@ function Show-WorkspaceInfo {
     } else {
         Write-Host "  Status: Not running"
     }
-    Write-Host "`n===============================================================`n" -ForegroundColor Cyan
+    WC "`n===============================================================`n"
 }
 
 function Show-QueHelp {
     param([string]$DefaultPublishTag)
-    Write-Host "`nAvailable commands:" -ForegroundColor Cyan
+    WC "`nAvailable commands:"
     Write-Host "  help                     - Show this help text"
     Write-Host "  open                     - Generate project files, build, and launch the editor"
     Write-Host "  build                    - Build the editor target"
@@ -2115,7 +2259,7 @@ function Invoke-QueMain {
     $IsDirectExecution = -not $IsDotSourced -and -not $IsRunFromUrl
     # MODE 1: DOT-SOURCED
     if ($IsDotSourced) {
-        Write-Host "QUE commands loaded" -ForegroundColor Green
+        WG "QUE commands loaded"
         return
     }
     # MODE 2: RUN FROM URL - Workspace/Clone Creation
@@ -2137,7 +2281,7 @@ function Invoke-QueMain {
             $CurrentItems = Get-ChildItem -Force -ErrorAction SilentlyContinue
             if ($CurrentItems.Count -gt 0) {
                 Write-Error "Current folder is not empty. QUE workspace must be initialized in an empty folder."
-                Write-Host "Please create and navigate to an empty folder, then run this command again." -ForegroundColor Yellow
+                WY "Please create and navigate to an empty folder, then run this command again."
                 return
             }
         }
@@ -2147,30 +2291,30 @@ function Invoke-QueMain {
             $ExistingRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
             if ($UrlOwner -and $UrlRepo -and -not $IsBootstrapScript) {
                 if ($ExistingOwner -eq $UrlOwner -and $ExistingRepo -eq $UrlRepo) {
-                    Write-Host "Found matching workspace at: $WorkspaceRoot" -ForegroundColor Green
+                    WG "Found matching workspace at: $WorkspaceRoot"
                     New-QueClone -WorkspaceRoot $WorkspaceRoot -ShouldClone $true
                 } else {
                     Write-Error "Current workspace is for $ExistingOwner/$ExistingRepo, but you're trying to create $UrlOwner/$UrlRepo"
-                    Write-Host "Please run this command in a folder outside this workspace to create a new workspace, or within a $UrlRepo workspace to create a new clone." -ForegroundColor Yellow
+                    WY "Please run this command in a folder outside this workspace to create a new workspace, or within a $UrlRepo workspace to create a new clone."
                     return
                 }
             } else {
                 Write-Error "Already in a QUE workspace for $ExistingOwner/$ExistingRepo"
-                Write-Host "To create a new workspace, run this command outside of an existing workspace." -ForegroundColor Yellow
+                WY "To create a new workspace, run this command outside of an existing workspace."
                 return
             }
         } else {
             $CurrentItems = Get-ChildItem -Force -ErrorAction SilentlyContinue
             if ($CurrentItems.Count -gt 0) {
                 Write-Error "Current folder is not empty. QUE workspace must be initialized in an empty folder."
-                Write-Host "Please create and navigate to an empty folder, then run this command again." -ForegroundColor Yellow
+                WY "Please create and navigate to an empty folder, then run this command again."
                 return
             }
-            Write-Host "`nQUE 5.7 - Quick Unreal Engine Project Manager" -ForegroundColor Cyan
+            WC "`nQUE 5.7 - Quick Unreal Engine Project Manager"
             $WorkspaceRoot = (Get-Location).Path
             if ($IsBootstrapScript) {
                 ###QUE_CREATION_MODE_BEGIN###
-                Write-Host "Setting up a new project workspace...`n" -ForegroundColor Green
+                WG "Setting up a new project workspace...`n"
                 $CurrentFolderName = Split-Path $WorkspaceRoot -Leaf
                 $DefaultRepoName = $CurrentFolderName -replace '[^a-zA-Z0-9_-]', ''
                 $GitHubRepo = Read-Host "Enter new repository name [$DefaultRepoName]"
@@ -2181,7 +2325,7 @@ function Invoke-QueMain {
                     Write-Error "Repository name cannot be empty"
                     return
                 }
-                Write-Host "Using repository name: $GitHubRepo" -ForegroundColor Green
+                WG "Using repository name: $GitHubRepo"
                 $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
                 $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
                 $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
@@ -2189,12 +2333,12 @@ function Invoke-QueMain {
                     Write-Error "Invalid GitHub PAT. Please check your token and try again."
                     return
                 }
-                Write-Host "Authenticated as: $($UserInfo.login)" -ForegroundColor Green
+                WG "Authenticated as: $($UserInfo.login)"
                 $GitHubOwner = $UserInfo.login
                 New-QueWorkspace -GitHubOwner $GitHubOwner -GitHubRepo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo
                 ###QUE_CREATION_MODE_END###
             } elseif ($UrlOwner -and $UrlRepo) {
-                Write-Host "Joining project: $UrlOwner/$UrlRepo`n" -ForegroundColor Green
+                WG "Joining project: $UrlOwner/$UrlRepo`n"
                 if ($quePlainPAT) {
                     $PlainPAT = $quePlainPAT
                 } else {
@@ -2206,7 +2350,7 @@ function Invoke-QueMain {
                     Write-Error "Invalid GitHub PAT. Please check your token and try again."
                     return
                 }
-                Write-Host "Authenticated as: $($UserInfo.login)" -ForegroundColor Green
+                WG "Authenticated as: $($UserInfo.login)"
                 New-QueWorkspace -GitHubOwner $UrlOwner -GitHubRepo $UrlRepo -PlainPAT $PlainPAT -UserInfo $UserInfo
             } else {
                 Write-Error "Cannot determine repository information from URL: $queUrl"
@@ -2221,11 +2365,11 @@ function Invoke-QueMain {
                 Write-Error "Not in a QUE workspace. Run this script via iex (iwr ...) to create one."
                 return
             }
-            Write-Host "Ensuring SyncThing is running..." -ForegroundColor Cyan
+            WC "Ensuring SyncThing is running..."
             $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
             $CurrentDeviceId = $SyncThingInfo.DeviceId
             if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $script:SyncThingDevices -and ($script:SyncThingDevices -notcontains $CurrentDeviceId)) {
-                Write-Host "Adding current device to SyncThing devices list..." -ForegroundColor Yellow
+                WY "Adding current device to SyncThing devices list..."
                 Write-Host "DEBUG: Current device ID: $CurrentDeviceId" -ForegroundColor Magenta
                 Write-Host "DEBUG: SyncThingDevices before adding: $($script:SyncThingDevices -join ', ')" -ForegroundColor Magenta
                 Write-Host "DEBUG: Count before: $($script:SyncThingDevices.Count)" -ForegroundColor Magenta
@@ -2245,7 +2389,7 @@ function Invoke-QueMain {
 "@ -f @('###', $DevicesBlock)
                 $UpdatedContent = $ScriptContent -replace ('{0}QUE_SYNCTHING_BEGIN{0}[\s\S]*?{0}QUE_SYNCTHING_END{0}' -f @('###')), $NewSyncThingBlock
                 Set-Content -Path $ScriptPath -Value $UpdatedContent
-                Write-Host "Script updated with current device. Please commit this change to share with team." -ForegroundColor Green
+                WG "Script updated with current device. Please commit this change to share with team."
             }
             if ($script:SyncThingDevices -and $script:SyncThingDevices.Count -gt 0) {
                 Update-SyncThingDevices -WorkspaceRoot $WorkspaceRoot -DeviceIds $script:SyncThingDevices -SyncThingInfo $SyncThingInfo
@@ -2254,11 +2398,11 @@ function Invoke-QueMain {
             $CloneRoot = Split-Path $ScriptPath -Parent
             $CloneName = Split-Path $CloneRoot -Leaf
             Write-UEGitConfigFiles -CloneRoot $CloneRoot
-            Write-Host "`n===============================================================" -ForegroundColor Cyan
-            Write-Host "  QUE - $script:GitHubOwner/$script:GitHubRepo" -ForegroundColor Green
-            Write-Host "  Clone: $CloneName" -ForegroundColor Yellow
+            WC "`n==============================================================="
+            WG "  QUE - $script:GitHubOwner/$script:GitHubRepo"
+            WY "  Clone: $CloneName"
             Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
-            Write-Host "===============================================================`n" -ForegroundColor Cyan
+            WC "===============================================================`n"
             while ($true) {
                 Write-Host "Commands: " -NoNewline -ForegroundColor White
                 Write-Host "open, build, clean, package, syncthing, info, new, clone, save, load, import, update, rename, reset, publish, help, exit" -ForegroundColor Gray
@@ -2291,6 +2435,9 @@ function Invoke-QueMain {
                         "exit"      { return }
                         ""          { continue }
                         default     { Write-Host "Unknown command: $RawCommand. Type 'help' for a list of commands." -ForegroundColor Red }
+                    }
+                    if ($Command -and $Command -ne "exit" -and $Command -ne "help") {
+                        Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -CloneName $CloneName -SkipIfDirty:$true
                     }
                 } catch {
                     Write-Host $_.Exception.Message -ForegroundColor Red

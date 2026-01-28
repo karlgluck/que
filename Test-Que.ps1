@@ -809,6 +809,13 @@ try {
         }
         Write-TestSuccess "Initial commit found"
 
+        # Verify clone is on its own work branch
+        $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($CurrentBranch -ne "que/$($FirstClone.Name)") {
+            Write-TestFailure "Clone did not switch to work branch after creation. Expected que/$($FirstClone.Name), got $CurrentBranch"
+        }
+        Write-TestSuccess "Clone is on work branch: $CurrentBranch"
+
         Pop-Location
 
         # Store workspace path for later phases
@@ -865,6 +872,7 @@ try {
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Initialize-SyncThing',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
+            'Ensure-QueCloneOnWorkBranch',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain'
         )
 
@@ -921,6 +929,16 @@ try {
         Write-TestSuccess "Second workspace clone created at: $($SecondClone.FullName)"
         $script:TestResults.Workspace2ClonePath = $SecondClone.FullName
         $script:TestResults.Workspace2CloneName = $SecondClone.Name
+
+        # Verify second clone is on its own work branch
+        Push-Location $SecondClone.FullName
+        $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($CurrentBranch -ne "que/$($SecondClone.Name)") {
+            Pop-Location
+            Write-TestFailure "Second clone did not switch to work branch after creation. Expected que/$($SecondClone.Name), got $CurrentBranch"
+        }
+        Write-TestSuccess "Second clone is on work branch: $CurrentBranch"
+        Pop-Location
 
         # Verify SyncThing is running (should have 2 instances now)
         Start-Sleep -Seconds 3  # Give SyncThing time to start
@@ -988,6 +1006,15 @@ try {
 
         $PublishedBranch = Invoke-QuePublishCommand -CloneRoot $SecondClonePath -TagName "lkg"
         Write-TestSuccess "Published branch $PublishedBranch to main and updated tag 'lkg'"
+
+        # Ensure clone returns to its work branch after publish (new flow)
+        Ensure-QueCloneOnWorkBranch -CloneRoot $SecondClonePath -CloneName $SecondCloneName -SkipIfDirty:$true
+        $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($CurrentBranch -ne "que/$SecondCloneName") {
+            Pop-Location
+            Write-TestFailure "Clone did not return to work branch after publish. Expected que/$SecondCloneName, got $CurrentBranch"
+        }
+        Write-TestSuccess "Clone is on work branch after publish: $CurrentBranch"
 
         # Verify remote work branch exists
         $BranchRef = "refs/remotes/origin/que/$SecondCloneName"
@@ -1090,6 +1117,15 @@ try {
 
         $PublishedSyncBranch = Invoke-QuePublishCommand -CloneRoot $Workspace2ClonePath
         Write-TestSuccess "Published device ID change from branch: $PublishedSyncBranch"
+
+        # Ensure clone returns to its work branch after publish (new flow)
+        Ensure-QueCloneOnWorkBranch -CloneRoot $Workspace2ClonePath -CloneName $Workspace2CloneName -SkipIfDirty:$true
+        $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($CurrentBranch -ne "que/$Workspace2CloneName") {
+            Pop-Location
+            Write-TestFailure "Clone did not return to work branch after publish. Expected que/$Workspace2CloneName, got $CurrentBranch"
+        }
+        Write-TestSuccess "Clone is on work branch after publish: $CurrentBranch"
 
         Pop-Location
 
@@ -1584,6 +1620,7 @@ try {
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Initialize-SyncThing',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
+            'Ensure-QueCloneOnWorkBranch',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain', 'Invoke-QueGit',
             'Get-QueCurrentBranch', 'Get-QueCloneNameFromPath', 'Invoke-QueMerge',
             'Invoke-QuePushWithRetry', 'Invoke-QueStashAll', 'Invoke-QueSaveCommand',
@@ -1619,6 +1656,16 @@ try {
                                               -SkipLaunch
         $NewCloneName = Split-Path $NewCloneRoot -Leaf
         Write-TestSuccess "Second clone created via que clone: $NewCloneRoot"
+
+        # Verify the new clone is on its own work branch
+        Push-Location $NewCloneRoot
+        $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($CurrentBranch -ne "que/$NewCloneName") {
+            Pop-Location
+            Write-TestFailure "New clone did not switch to work branch after creation. Expected que/$NewCloneName, got $CurrentBranch"
+        }
+        Write-TestSuccess "New clone is on work branch: $CurrentBranch"
+        Pop-Location
 
         # Step 9.2: Validate Clone Structure
         Write-Host "`nStep 9.2: Validating clone structure" -ForegroundColor Cyan
