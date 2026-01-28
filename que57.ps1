@@ -334,6 +334,72 @@ function Test-GitHubPAT {
     return $null
 }
 
+function Test-GitHubRepoEmpty {
+    # Returns $true if the repo exists but has no commits
+    param([string]$Owner, [string]$Repo, [string]$PlainPAT)
+    try {
+        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
+        $CommitsUrl = "https://api.github.com/repos/$Owner/$Repo/commits?per_page=1"
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri $CommitsUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
+        if ($Response.StatusCode -eq 200) {
+            $Content = $Response.Content
+            if (-not $Content -or $Content.Trim() -eq "[]") { return $true }
+            return $false
+        }
+    } catch {
+        $StatusCode = $null
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+        }
+        if ($StatusCode -eq 409) { return $true } # Git Repository is empty
+        if ($StatusCode -eq 404) { return $false }
+        Write-Warning "Failed to check if repository has commits: $($_.Exception.Message)"
+        return $false
+    }
+    return $false
+}
+
+function Ensure-GitHubRepoExists {
+    # Creates the GitHub repo if it does not exist
+    param([string]$Owner, [string]$Repo, [string]$PlainPAT, [object]$UserInfo)
+    try {
+        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
+        $RepoUrl = "https://api.github.com/repos/$Owner/$Repo"
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
+        if ($Response.StatusCode -eq 200) { return $true }
+    } catch {
+        $StatusCode = $null
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+        }
+        if ($StatusCode -ne 404) {
+            Write-Error "Failed to check if repository exists: $($_.Exception.Message)"
+            return $false
+        }
+    }
+    Write-Host "`nCreating GitHub repository $Owner/$Repo..." -ForegroundColor Cyan
+    try {
+        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
+        $CreateRepoBody = @{
+            name = $Repo
+            private = $true
+            auto_init = $false
+        } | ConvertTo-Json
+        $CreateUrl = if ($Owner -eq $UserInfo.login) {
+            "https://api.github.com/user/repos"
+        } else {
+            "https://api.github.com/orgs/$Owner/repos"
+        }
+        Invoke-WebRequest -UseBasicParsing -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
+        Write-Host "Repository created successfully" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Error "Failed to create repository: $($_.Exception.Message)"
+        Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $Owner"
+        return $false
+    }
+}
+
 function Get-NextCloneName {
     # Generates a unique Hawaiian-sounding clone directory name
     param([string]$WorkspaceRoot)
@@ -525,7 +591,7 @@ function Sync-WingetPackage {
     # Installs or updates a package using winget with retry logic (3 attempts)
     param([string]$PackageName, [string]$PackageParameters = '')
     Write-Host "Ensuring $PackageName is installed..." -ForegroundColor Cyan
-    $ListOutput = & winget list --id $PackageName --exact 2>&1
+    $ListOutput = & winget list --id $PackageName --exact --accept-source-agreements 2>&1
     if ($LASTEXITCODE -eq 0 -and $ListOutput -match $PackageName) {
         Write-Host "$PackageName is already installed" -ForegroundColor Green
         return
@@ -1155,9 +1221,18 @@ function New-QueWorkspace {
     # Determine initialization mode
     $ShouldClone = $false
     $InitMode = 0  # 0 = blank, 1 = from other GitHub repo, 2 = from local, 3 = as part of existing GitHub repo
+    $RepoIsEmpty = $false
     if ($RepoExists) {
-        $ShouldClone = $true
-        $InitMode = 3
+        $RepoIsEmpty = Test-GitHubRepoEmpty -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT
+        if ($RepoIsEmpty) {
+            Write-Host "Repository exists but is empty. Proceeding with blank project initialization." -ForegroundColor Yellow
+            $ShouldClone = $false
+            $InitMode = 0
+        } else {
+            Write-Host "`nRepository $GitHubOwner/$GitHubRepo already exists and is not empty." -ForegroundColor Yellow
+            Write-Host "Aborting setup so you can choose a different repository name." -ForegroundColor Yellow
+            return
+        }
     } else {
         Write-Host "`nSelect initialization method:" -ForegroundColor Yellow
         $Options = @(
@@ -1189,26 +1264,7 @@ function New-QueWorkspace {
                 $CopyFromLocal = $LocalRepoPath
             }
         }
-        # Create new repo on GitHub first
-        Write-Host "`nCreating GitHub repository $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
-        try {
-            $CreateRepoBody = @{
-                name = $GitHubRepo
-                private = $true
-                auto_init = $false
-            } | ConvertTo-Json
-            $CreateUrl = if ($GitHubOwner -eq $UserInfo.login) {
-                "https://api.github.com/user/repos"
-            } else {
-                "https://api.github.com/orgs/$GitHubOwner/repos"
-            }
-            Invoke-WebRequest -UseBasicParsing -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
-            Write-Host "Repository created successfully" -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to create repository: $($_.Exception.Message)"
-            Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $GitHubOwner"
-            return
-        }
+        Write-Host "`nRepository will be created later in the setup process." -ForegroundColor Gray
     }
     Install-AllDependencies
     Write-Host "`nInitializing SyncThing..." -ForegroundColor Cyan
@@ -1223,6 +1279,9 @@ function New-QueWorkspace {
         Write-Host "  2. Add and commit your files with git" -ForegroundColor White
         Write-Host "  3. Push to GitHub when ready" -ForegroundColor White
     } elseif ($InitMode -eq 1 -and $CloneFromSource) {
+        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+            return
+        }
         Push-Location $CloneRoot
         git remote add source $CloneFromSource 2>&1 | ForEach-Object { "$_" } | Out-Host
         git fetch source 2>&1 | ForEach-Object { "$_" } | Out-Host
@@ -1235,6 +1294,9 @@ function New-QueWorkspace {
         $SourceFiles = Get-ChildItem $CopyFromLocal -Exclude ".git" -Force
         foreach ($File in $SourceFiles) {
             Copy-Item $File.FullName -Destination $CloneRoot -Recurse -Force
+        }
+        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+            return
         }
         Push-Location $CloneRoot
         git add -A 2>&1 | ForEach-Object { "$_" } | Out-Host
@@ -1249,6 +1311,19 @@ function New-QueWorkspace {
         git pull 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
         Write-Host "Pulled latest from repository into $CloneRoot" -ForegroundColor Green
+    }
+    $ProjectScriptPath = Join-Path $CloneRoot "que57-project.ps1"
+    if (-not (Test-Path $ProjectScriptPath)) {
+        if (Test-Path variable:queScript -and $queScript) {
+            Write-Host "que57-project.ps1 missing; generating now..." -ForegroundColor Yellow
+            $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
+            New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+        }
+    }
+    if (-not (Test-Path $ProjectScriptPath)) {
+        Write-Error "Workspace creation incomplete: que57-project.ps1 is missing in $CloneRoot"
+        Write-Host "Fix the repository or rerun the setup to generate que57-project.ps1 before continuing." -ForegroundColor Yellow
+        return
     }
     Set-Content -Path ".que/workspace-version" -Value "1"
     Write-Host "`nWorkspace created successfully!" -ForegroundColor Green
@@ -1346,6 +1421,55 @@ function New-QueClone {
         git config --local push.autoSetupRemote true
         Pop-Location
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
+        $ProjectScriptPath = "$CloneRoot\que57-project.ps1"
+        $RepoHasCommits = $true
+        Push-Location $CloneRoot
+        git rev-parse --verify HEAD 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { $RepoHasCommits = $false }
+        Pop-Location
+        if (-not $RepoHasCommits) {
+            Write-Host "Repository is empty. Initializing default QUE files..." -ForegroundColor Yellow
+            Write-GitConfigFiles -CloneRoot $CloneRoot
+            $ReadmeContent = $EmbeddedReadme -replace '{{OWNER}}', $GitHubOwner -replace '{{REPO}}', $GitHubRepo
+            Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
+            if (-not (Test-Path $ProjectScriptPath)) {
+                Write-Host "Generating que57-project.ps1..." -ForegroundColor Cyan
+                $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
+                if (Test-Path variable:queScript -and $queScript) {
+                    New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+                } else {
+                    Write-Warning "Cannot generate que57-project.ps1 (bootstrap script not available)."
+                }
+            }
+            Push-Location $CloneRoot
+            git add . 2>&1 | ForEach-Object { "$_" } | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                throw "git add failed"
+            }
+            git commit -m "Initial commit: QUE workspace setup" 2>&1 | ForEach-Object { "$_" } | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                throw "git commit failed"
+            }
+            git push -u origin main 2>&1 | ForEach-Object { "$_" } | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                throw "git push failed"
+            }
+            Pop-Location
+            Write-Host "`nRepository initialized and pushed to GitHub!" -ForegroundColor Green
+            Write-Host "After creating the .uproject file, the UE git config files will be auto-generated." -ForegroundColor Yellow
+        } elseif (-not (Test-Path $ProjectScriptPath)) {
+            if (Test-Path variable:queScript -and $queScript) {
+                Write-Host "que57-project.ps1 missing; generating from bootstrap script..." -ForegroundColor Yellow
+                $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
+                New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+                Write-Host "Please commit and push que57-project.ps1 to share with your team." -ForegroundColor Yellow
+            } else {
+                Write-Warning "que57-project.ps1 missing and cannot be generated (bootstrap script not available)."
+            }
+        }
     } else {
         Write-Host "Initializing new repository..." -ForegroundColor Cyan
         Push-Location $CloneRoot
@@ -1367,6 +1491,9 @@ function New-QueClone {
         Write-Host "Generating que57-project.ps1..." -ForegroundColor Cyan
         $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
         New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+            return
+        }
         Push-Location $CloneRoot
         git add . 2>&1 | ForEach-Object { "$_" } | Out-Host
         if ($LASTEXITCODE -ne 0) {
