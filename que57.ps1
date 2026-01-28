@@ -1524,7 +1524,33 @@ function New-QueClone {
     New-WindowsShortcut -ShortcutPath $ShortcutPath -TargetScript $TargetScript
     Write-Host "Created shortcut: $ShortcutPath" -ForegroundColor Green
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"
+    Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -CloneName $CloneName -SkipIfDirty:$true
     return $CloneRoot
+}
+
+# Ensures a clone stays on its own work branch (que/<clone>) when safe to do so.
+function Ensure-QueCloneOnWorkBranch {
+    param([string]$CloneRoot, [string]$CloneName, [switch]$SkipIfDirty = $true)
+    if (-not $CloneRoot -or -not $CloneName) { return }
+    $WorkBranch = "que/$CloneName"
+    Push-Location $CloneRoot
+    try {
+        $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0 -or -not $CurrentBranch) { return }
+        if ($CurrentBranch -eq $WorkBranch) { return }
+        if ($SkipIfDirty) {
+            $Status = git status --porcelain 2>$null
+            if ($LASTEXITCODE -eq 0 -and $Status) { return }
+        }
+        git show-ref --verify "refs/heads/$WorkBranch" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            git switch $WorkBranch 2>&1 | Out-Null
+        } else {
+            git switch -c $WorkBranch 2>&1 | Out-Null
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 # ----------------------------------------------------------------------------
@@ -2436,6 +2462,9 @@ function Invoke-QueMain {
                         "exit"      { return }
                         ""          { continue }
                         default     { Write-Host "Unknown command: $RawCommand. Type 'help' for a list of commands." -ForegroundColor Red }
+                    }
+                    if ($Command -and $Command -ne "exit" -and $Command -ne "help") {
+                        Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -CloneName $CloneName -SkipIfDirty:$true
                     }
                 } catch {
                     Write-Host $_.Exception.Message -ForegroundColor Red
