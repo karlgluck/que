@@ -2148,13 +2148,31 @@ function Package-UnrealProject {
 
 function Open-SyncThingBrowser {
     param([string]$WorkspaceRoot)
-    $SyncThingHome = "$WorkspaceRoot\.que\syncthing"
+    $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
+    if (-not $SyncThingInfo) {
+        Write-Host "SyncThing is not available" -ForegroundColor Red
+        return
+    }
     $SyncThingExe = Get-SyncThingExecutable
     if (-not $SyncThingExe) {
         Write-Host "SyncThing executable not found" -ForegroundColor Red
         return
     }
-    & $SyncThingExe browser --home="$SyncThingHome"
+    $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
+    $GuiAddress = $SyncThingInfo.GuiAddress
+    $ApiKey = $SyncThingInfo.ApiKey
+    $RawAddress = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "gui", "raw-address", "get") -QuietErrors
+    $RawAddress = $RawAddress | Select-Object -First 1
+    if ($RawAddress) {
+        $RawAddress = $RawAddress.Trim()
+    }
+    if (-not $RawAddress) {
+        $RawAddress = $GuiAddress
+    }
+    if ($RawAddress -notmatch '^https?://') {
+        $RawAddress = "http://$RawAddress"
+    }
+    Start-Process $RawAddress
 }
 
 function Show-WorkspaceInfo {
