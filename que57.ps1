@@ -221,7 +221,7 @@ function Read-SecureFile($Path) {
 # Configure local git settings for a QUE clone
 function Set-QueGitConfig($UserInfo) {
     git config --local user.name $UserInfo.name
-    git config --local user.email ("{0}-{1}@users.noreply.github.com" -f @($UserInfo.id, $UserInfo.login))
+    git config --local user.email ("{0}@users.noreply.github.com" -f @($UserInfo.login))
     git config --local credential.username $UserInfo.login
     git config --local lfs.locksverify false
     git config --local push.autoSetupRemote true
