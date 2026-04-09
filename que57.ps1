@@ -8,6 +8,21 @@
 # ============================================================================
 # Repository: https://github.com/karlgluck/que
 # Target: Unreal Engine 5.7
+#
+# ARCHITECTURE:
+# This is a single-file tool with 3 execution modes determined at runtime:
+#   Mode 1 (dot-sourced): Exports functions only, no side effects.
+#   Mode 2 (iex from URL): Bootstrap/installer. Creates workspaces and clones.
+#     Generates que57-project.ps1 by regex-replacing marker sections in itself.
+#   Mode 3 (direct execution): Management session. Injects `que` function +
+#     tab completion into PS session, then returns to normal prompt.
+#
+# SELF-REWRITE: Sections between ###QUE_*_BEGIN### / ###QUE_*_END### markers
+# are replaced at generation time. The script can also rewrite its own
+# SyncThing device list at runtime (Mode 3).
+#
+# TOKEN BUDGET: This script is designed to fit in ~20k tokens for single-pass
+# LLM processing. Keep it concise. Use short helper names (WG/WC/WY/WR/WW).
 # ============================================================================
 
 # ----------------------------------------------------------------------------
@@ -456,53 +471,15 @@ function Get-NextCloneName {
 }
 
 function Find-UProjectFile {
-    # Finds .uproject file in clone directory using breadth-first search. Returns full path or $null.
-    # Excludes Samples/ and Templates/ directories
+    # Finds .uproject file in clone directory. Returns full path or $null.
     param([string]$CloneRoot)
-    $Queue = @(Get-ChildItem -Path $CloneRoot -Directory -ErrorAction SilentlyContinue)
-    $UProjects = @()
-    $Visited = @{}  # Track visited directories to prevent infinite loops
-    $MaxIterations = 10000  # Safety limit
-    $Iterations = 0
-
-    $RootProjects = Get-ChildItem -Path $CloneRoot -Filter "*.uproject" -ErrorAction SilentlyContinue
-    if ($RootProjects) { $UProjects += $RootProjects }
-
-    while ($Queue.Count -gt 0) {
-        $Iterations++
-        if ($Iterations -gt $MaxIterations) {
-            Write-Warning "Search iteration limit reached. Possible circular directory reference detected."
-            break
-        }
-
-        $Current = $Queue[0]
-        # More robust array slicing
-        if ($Queue.Count -eq 1) {
-            $Queue = @()
-        } else {
-            $Queue = $Queue[1..($Queue.Count - 1)]
-        }
-
-        # Skip if already visited (prevents circular references)
-        $CurrentPath = $Current.FullName
-        if ($Visited.ContainsKey($CurrentPath)) { continue }
-        $Visited[$CurrentPath] = $true
-
-        if ($Current.Name -in @('Samples', 'Templates', 'Binaries', 'Intermediate', 'Saved')) { continue }
-
-        $Projects = Get-ChildItem -Path $Current.FullName -Filter "*.uproject" -ErrorAction SilentlyContinue
-        if ($Projects) { $UProjects += $Projects }
-
-        $SubDirs = Get-ChildItem -Path $Current.FullName -Directory -ErrorAction SilentlyContinue
-        $Queue += $SubDirs
-    }
+    $Exclude = @('Samples', 'Templates', 'Binaries', 'Intermediate', 'Saved')
+    $UProjects = @(Get-ChildItem -Path $CloneRoot -Recurse -Filter "*.uproject" -ErrorAction SilentlyContinue |
+        Where-Object { $Rel = $_.FullName.Substring($CloneRoot.Length + 1); -not ($Exclude | Where-Object { $Rel.StartsWith("$_\") }) })
     if ($UProjects.Count -eq 0) { return $null }
     if ($UProjects.Count -gt 1) {
-        $UProjectPath = $UProjects[0].FullName
-        $OtherProjects = $UProjects[1..($UProjects.Count - 1)] | ForEach-Object { $_.FullName }
-        Write-Warning "Multiple .uproject files found. Using first one: $UProjectPath"
-        Write-Warning "Other .uproject files found: $($OtherProjects -join ', ')"
-        return $UProjectPath
+        Write-Warning "Multiple .uproject files found. Using first one: $($UProjects[0].FullName)"
+        Write-Warning "Other .uproject files found: $(($UProjects[1..($UProjects.Count - 1)] | ForEach-Object { $_.FullName }) -join ', ')"
     }
     return $UProjects[0].FullName
 }
@@ -513,7 +490,7 @@ function New-WindowsShortcut {
     $WshShell = New-Object -ComObject WScript.Shell
     $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
     $Shortcut.TargetPath = "powershell.exe"
-    $Shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$TargetScript`""
+    $Shortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -Command `"& { `$QueLaunchSession = `$true; . '$TargetScript' }`""
     $Shortcut.WorkingDirectory = Split-Path $TargetScript -Parent
     $Shortcut.Save()
 }
@@ -808,14 +785,6 @@ function Ensure-SyncThingRunning {
     return $SyncThingInfo
 }
 
-function Initialize-SyncThing {
-    # Initializes SyncThing for the workspace
-    param([string]$WorkspaceRoot)
-    $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
-    if (-not $SyncThingInfo) { throw "Failed to start SyncThing" }
-    return $SyncThingInfo
-}
-
 function Configure-SyncThingFolders {
     # Configures SyncThing folders for git-lfs (with --ignore-delete flag) and depot (bidirectional)
     param([string]$WorkspaceRoot, [hashtable]$SyncThingInfo)
@@ -973,55 +942,24 @@ function Wait-ForSyncThingLfsSync {
             WC "Waiting for SyncThing to sync LFS files ($($Status.needFiles) files, $needMB MB)..."
         }
 
-        # Wait for sync with progress bar
         $StartTime = Get-Date
-        $LastPercent = -1
-
         while (((Get-Date) - $StartTime).TotalSeconds -lt $TimeoutSeconds) {
             try {
                 $Status = Invoke-RestMethod -Uri $StatusUrl -Headers $Headers -Method Get -TimeoutSec 5 -ErrorAction Stop
-
-                # Calculate completion percentage
-                if ($Status.globalBytes -gt 0) {
-                    $Percent = [math]::Round((($Status.globalBytes - $Status.needBytes) / $Status.globalBytes) * 100, 1)
-                } else {
-                    $Percent = 100
-                }
-
-                # Show progress bar if percentage changed
-                if ($Percent -ne $LastPercent -and -not $Silent) {
-                    $ElapsedSeconds = [int]((Get-Date) - $StartTime).TotalSeconds
-                    Write-Progress -Activity "Syncing LFS files via SyncThing" `
-                                   -Status "$Percent% complete ($($Status.needFiles) files remaining)" `
-                                   -PercentComplete $Percent `
-                                   -SecondsRemaining (if ($Percent -gt 0) { [int]($ElapsedSeconds * (100 - $Percent) / $Percent) } else { -1 })
-                    $LastPercent = $Percent
-                }
-
-                # Check if sync is complete
                 if ($Status.needBytes -eq 0 -and $Status.needDeletes -eq 0 -and $Status.needFiles -eq 0) {
-                    if (-not $Silent) {
-                        Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
-                        WG "LFS sync complete"
-                    }
+                    if (-not $Silent) { WG "LFS sync complete" }
                     return $true
                 }
-
+                if (-not $Silent) { Write-Host "." -NoNewline }
                 Start-Sleep -Milliseconds 500
             } catch {
-                # API call failed, likely SyncThing not running
-                if (-not $Silent) {
-                    Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
-                    WY "SyncThing API unavailable, proceeding without sync wait"
-                }
+                if (-not $Silent) { WY "`nSyncThing API unavailable, proceeding without sync wait" }
                 return $false
             }
         }
 
-        # Timeout reached
         if (-not $Silent) {
-            Write-Progress -Activity "Syncing LFS files via SyncThing" -Completed
-            WY "Sync wait timeout reached after $TimeoutSeconds seconds"
+            WY "`nSync wait timeout reached after $TimeoutSeconds seconds"
             WY "Some LFS files may not be available yet"
         }
         return $false
@@ -1243,7 +1181,8 @@ function New-QueWorkspace {
     }
     Install-AllDependencies
     WC "`nInitializing SyncThing..."
-    $SyncThingInfo = Initialize-SyncThing -WorkspaceRoot $WorkspaceRoot
+    $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
+    if (-not $SyncThingInfo) { throw "Failed to start SyncThing" }
     WC "`nCreating first clone..."
     $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone $true -ShouldClone $ShouldClone -UserInfo $UserInfo -PlainPAT $PlainPAT -SyncThingInfo $SyncThingInfo
     # Handle special initialization modes
@@ -1304,6 +1243,14 @@ function New-QueWorkspace {
     WG "`nWorkspace created successfully!"
 }
 
+function Invoke-WithLfsSkip([scriptblock]$Block) {
+    $prev = $env:GIT_LFS_SKIP_SMUDGE; $env:GIT_LFS_SKIP_SMUDGE = '1'
+    try { & $Block } finally {
+        if ($null -ne $prev) { $env:GIT_LFS_SKIP_SMUDGE = $prev }
+        else { Remove-Item env:GIT_LFS_SKIP_SMUDGE -EA 0 }
+    }
+}
+
 function New-QueClone {
     # Creates a new clone in an existing workspace
     param(
@@ -1344,49 +1291,28 @@ function New-QueClone {
             throw "Source path not found: $SourcePath"
         }
         WC "Cloning from existing workspace state at $SourcePath..."
-        $PreviousGitLfsSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
-        $env:GIT_LFS_SKIP_SMUDGE = '1'
-        Push-Location $CloneRoot
-        git clone --no-hardlinks $SourcePath . 2>&1 | ForEach-Object { "$_" } | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Pop-Location
-            if ($null -ne $PreviousGitLfsSkipSmudge) {
-                $env:GIT_LFS_SKIP_SMUDGE = $PreviousGitLfsSkipSmudge
-            } else {
-                Remove-Item env:GIT_LFS_SKIP_SMUDGE -ErrorAction SilentlyContinue
-            }
-            throw "git clone from $SourcePath failed with exit code $LASTEXITCODE"
+        Invoke-WithLfsSkip {
+            Push-Location $CloneRoot
+            try {
+                git clone --no-hardlinks $SourcePath . 2>&1 | ForEach-Object { "$_" } | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "git clone from $SourcePath failed with exit code $LASTEXITCODE" }
+                git remote set-url origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
+                Set-QueGitConfig $UserInfo
+            } finally { Pop-Location }
         }
-        if ($null -ne $PreviousGitLfsSkipSmudge) {
-            $env:GIT_LFS_SKIP_SMUDGE = $PreviousGitLfsSkipSmudge
-        } else {
-            Remove-Item env:GIT_LFS_SKIP_SMUDGE -ErrorAction SilentlyContinue
-        }
-        git remote set-url origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
-        Set-QueGitConfig $UserInfo
-        Pop-Location
         WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
     } elseif ($ShouldClone) {
         WC "Cloning $GitHubOwner/$GitHubRepo..."
-        $PreviousGitLfsSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
-        $env:GIT_LFS_SKIP_SMUDGE = '1'
-        Push-Location $CloneRoot
-        git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 | ForEach-Object { "$_" } | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Pop-Location
-            throw "git clone failed with exit code $LASTEXITCODE"
+        Invoke-WithLfsSkip {
+            Push-Location $CloneRoot
+            try {
+                git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 | ForEach-Object { "$_" } | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
+                Set-QueGitConfig $UserInfo
+            } finally { Pop-Location }
         }
-        if ($null -ne $PreviousGitLfsSkipSmudge) {
-            $env:GIT_LFS_SKIP_SMUDGE = $PreviousGitLfsSkipSmudge
-        } else {
-            Remove-Item env:GIT_LFS_SKIP_SMUDGE -ErrorAction SilentlyContinue
-        }
-        Pop-Location
         WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
-        Push-Location $CloneRoot
-        Set-QueGitConfig $UserInfo
-        Pop-Location
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
         $ProjectScriptPath = "$CloneRoot\que57-project.ps1"
         $RepoHasCommits = $true
@@ -2370,12 +2296,7 @@ function Invoke-QueMain {
             $CurrentDeviceId = $SyncThingInfo.DeviceId
             if ((-not [string]::IsNullOrWhiteSpace($CurrentDeviceId)) -and $script:SyncThingDevices -and ($script:SyncThingDevices -notcontains $CurrentDeviceId)) {
                 WY "Adding current device to SyncThing devices list..."
-                Write-Host "DEBUG: Current device ID: $CurrentDeviceId" -ForegroundColor Magenta
-                Write-Host "DEBUG: SyncThingDevices before adding: $($script:SyncThingDevices -join ', ')" -ForegroundColor Magenta
-                Write-Host "DEBUG: Count before: $($script:SyncThingDevices.Count)" -ForegroundColor Magenta
                 $script:SyncThingDevices += $CurrentDeviceId
-                Write-Host "DEBUG: SyncThingDevices after adding: $($script:SyncThingDevices -join ', ')" -ForegroundColor Magenta
-                Write-Host "DEBUG: Count after: $($script:SyncThingDevices.Count)" -ForegroundColor Magenta
                 $ScriptPath = $PSCommandPath
                 $ScriptContent = Get-Content $ScriptPath -Raw
                 $DevicesEntries = $script:SyncThingDevices | ForEach-Object {
@@ -2398,51 +2319,58 @@ function Invoke-QueMain {
             $CloneRoot = Split-Path $ScriptPath -Parent
             $CloneName = Split-Path $CloneRoot -Leaf
             Write-UEGitConfigFiles -CloneRoot $CloneRoot
-            WC "`n==============================================================="
-            WG "  QUE - $script:GitHubOwner/$script:GitHubRepo"
-            WY "  Clone: $CloneName"
-            Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
-            WC "===============================================================`n"
-            while ($true) {
-                Write-Host "Commands: " -NoNewline -ForegroundColor White
-                Write-Host "open, build, clean, package, syncthing, info, new, clone, save, load, import, update, rename, reset, publish, help, exit" -ForegroundColor Gray
-                $RawCommand = Read-Host "`nQUE>"
-                $Tokens = $RawCommand.Trim().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
-                if (-not $Tokens -or $Tokens.Count -eq 0) { continue }
-                $Command = $Tokens[0].ToLower()
-                $Arg1 = if ($Tokens.Count -gt 1) { $Tokens[1] } else { $null }
+            $global:QueCloneRoot = $CloneRoot
+            $global:QueWorkspaceRoot = $WorkspaceRoot
+            $global:QueCloneName = $CloneName
+            $global:QueDefaultPublishTag = $script:QueDefaultPublishTag
+
+            function global:que {
+                param([string]$Command, [string]$Arg)
+                if (-not $Command) { Show-QueHelp -DefaultPublishTag $global:QueDefaultPublishTag; return }
+                $Command = $Command.ToLower()
                 try {
                     switch ($Command) {
-                        "open"      { Open-UnrealProject -CloneRoot $CloneRoot }
-                        "build"     { Build-UnrealProject -CloneRoot $CloneRoot }
-                        "clean"     { Clean-UnrealProject -CloneRoot $CloneRoot }
-                        "package"   { Package-UnrealProject -CloneRoot $CloneRoot }
-                        "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $WorkspaceRoot }
-                        "info"      { Show-WorkspaceInfo -WorkspaceRoot $WorkspaceRoot -CloneRoot $CloneRoot }
-                        "new"       { Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $Arg1 | Out-Null }
-                        "clone"     { Invoke-QueCloneCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -CloneName $Arg1 | Out-Null }
-                        "save"      { Invoke-QueSaveCommand -CloneRoot $CloneRoot | Out-Null }
-                        "load"      { Invoke-QueLoadCommand -WorkspaceRoot $WorkspaceRoot -SourceCloneRoot $CloneRoot -Name $Arg1 | Out-Null }
-                        "import"    { Invoke-QueImportCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
-                        "update"    { Invoke-QueUpdateCommand -CloneRoot $CloneRoot | Out-Null }
-                        "rename"    { Invoke-QueRenameCommand -CloneRoot $CloneRoot -Name $Arg1 | Out-Null }
-                        "reset"     { Invoke-QueResetCommand -CloneRoot $CloneRoot | Out-Null }
-                        "publish"   {
-                            $TagName = $Arg1
-                            Invoke-QuePublishCommand -CloneRoot $CloneRoot -TagName $TagName | Out-Null
-                        }
-                        "help"      { Show-QueHelp -DefaultPublishTag $script:QueDefaultPublishTag }
-                        "exit"      { return }
-                        ""          { continue }
-                        default     { Write-Host "Unknown command: $RawCommand. Type 'help' for a list of commands." -ForegroundColor Red }
+                        "open"      { Open-UnrealProject -CloneRoot $global:QueCloneRoot }
+                        "build"     { Build-UnrealProject -CloneRoot $global:QueCloneRoot }
+                        "clean"     { Clean-UnrealProject -CloneRoot $global:QueCloneRoot }
+                        "package"   { Package-UnrealProject -CloneRoot $global:QueCloneRoot }
+                        "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $global:QueWorkspaceRoot }
+                        "info"      { Show-WorkspaceInfo -WorkspaceRoot $global:QueWorkspaceRoot -CloneRoot $global:QueCloneRoot }
+                        "new"       { Invoke-QueNewCommand -WorkspaceRoot $global:QueWorkspaceRoot -CloneName $Arg | Out-Null }
+                        "clone"     { Invoke-QueCloneCommand -WorkspaceRoot $global:QueWorkspaceRoot -SourceCloneRoot $global:QueCloneRoot -CloneName $Arg | Out-Null }
+                        "save"      { Invoke-QueSaveCommand -CloneRoot $global:QueCloneRoot | Out-Null }
+                        "load"      { Invoke-QueLoadCommand -WorkspaceRoot $global:QueWorkspaceRoot -SourceCloneRoot $global:QueCloneRoot -Name $Arg | Out-Null }
+                        "import"    { Invoke-QueImportCommand -CloneRoot $global:QueCloneRoot -Name $Arg | Out-Null }
+                        "update"    { Invoke-QueUpdateCommand -CloneRoot $global:QueCloneRoot | Out-Null }
+                        "rename"    { Invoke-QueRenameCommand -CloneRoot $global:QueCloneRoot -Name $Arg | Out-Null }
+                        "reset"     { Invoke-QueResetCommand -CloneRoot $global:QueCloneRoot | Out-Null }
+                        "publish"   { Invoke-QuePublishCommand -CloneRoot $global:QueCloneRoot -TagName $Arg | Out-Null }
+                        "help"      { Show-QueHelp -DefaultPublishTag $global:QueDefaultPublishTag }
+                        "exit"      { exit }
+                        default     { Write-Host "Unknown command: $Command. Type 'que help' for a list of commands." -ForegroundColor Red; return }
                     }
-                    if ($Command -and $Command -ne "exit" -and $Command -ne "help") {
-                        Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -CloneName $CloneName -SkipIfDirty:$true
+                    if ($Command -notin @("exit", "help")) {
+                        Ensure-QueCloneOnWorkBranch -CloneRoot $global:QueCloneRoot -CloneName $global:QueCloneName -SkipIfDirty:$true
                     }
                 } catch {
                     Write-Host $_.Exception.Message -ForegroundColor Red
                 }
             }
+
+            $QueSubcommands = @('open','build','clean','package','syncthing','info','new','clone','save','load','import','update','rename','reset','publish','help','exit')
+            Register-ArgumentCompleter -CommandName que -ScriptBlock {
+                param($commandName, $parameterName, $wordToComplete)
+                $QueSubcommands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+                }
+            }.GetNewClosure()
+
+            WC "`n==============================================================="
+            WG "  QUE - $script:GitHubOwner/$script:GitHubRepo"
+            WY "  Clone: $CloneName"
+            Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
+            WC "==============================================================="
+            WC "Type 'que <command>' or 'que help' for available commands.`n"
         }
     }
 }
@@ -2451,7 +2379,11 @@ function Invoke-QueMain {
 # SCRIPT ENTRY POINT
 # ----------------------------------------------------------------------------
 $IsDotSourced = $MyInvocation.InvocationName -eq '.'
-if (-not $IsDotSourced) {
+# Mode 1 (manual dot-source) skips Invoke-QueMain so helper functions can be
+# imported without side effects. The shortcut also dot-sources (so the injected
+# `que` function survives into the -NoExit session), but sets $QueLaunchSession
+# first so we still run Mode 3 here.
+if ((-not $IsDotSourced) -or $QueLaunchSession) {
     Invoke-QueMain
 }
 

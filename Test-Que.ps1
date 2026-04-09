@@ -402,6 +402,71 @@ function Wait-ForProcessExit {
     return $false
 }
 
+function Invoke-QueViaShortcut {
+    <#
+    .SYNOPSIS
+        Runs a `que <subcommand>` through the same path as the real .lnk shortcut.
+    .DESCRIPTION
+        Spawns a powershell subprocess that mirrors the shortcut arguments
+        (dot-sources que57-project.ps1 with $QueLaunchSession = $true), asserts
+        that Mode 3 setup injected the `que` function, then invokes the
+        requested subcommand and exits. Use this instead of direct Invoke-Que*
+        calls so tests exercise the actual user entry path end-to-end.
+
+        Non-zero exit codes throw; callers verify command effects post-hoc
+        (git state, file existence) since the `que` function internally
+        catches and prints errors rather than propagating them.
+    .PARAMETER CloneRoot
+        The clone directory whose que57-project.ps1 to launch.
+    .PARAMETER QueCommand
+        The subcommand string to pass to `que` (e.g. "save", "publish lkg",
+        "import foo"). Leave empty to just launch + verify setup.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$CloneRoot,
+        [string]$QueCommand = ""
+    )
+
+    $ScriptPath = Join-Path $CloneRoot "que57-project.ps1"
+    if (-not (Test-Path $ScriptPath)) {
+        throw "que57-project.ps1 not found at: $ScriptPath"
+    }
+
+    $EscClone  = $CloneRoot  -replace "'", "''"
+    $EscScript = $ScriptPath -replace "'", "''"
+
+    # Inner command mirrors New-WindowsShortcut's arguments: dot-source with the
+    # $QueLaunchSession sentinel so the entry-point guard runs Invoke-QueMain.
+    $Inner = @"
+Set-Location '$EscClone'
+`$QueLaunchSession = `$true
+. '$EscScript'
+if (-not (Get-Command que -CommandType Function -ErrorAction SilentlyContinue)) {
+    Write-Host 'QUETEST_FAIL_NO_QUE_FUNCTION' -ForegroundColor Red
+    exit 97
+}
+"@
+    if ($QueCommand) {
+        $Inner += "`nque $QueCommand`n"
+    }
+    $Inner += "exit 0`n"
+
+    $Output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Inner 2>&1
+    $ExitCode = $LASTEXITCODE
+
+    if ($ExitCode -eq 97) {
+        throw "Shortcut-style launch did NOT inject `que` function into the session. This means Mode 3 setup never ran (entry-point guard broken?). Script: $ScriptPath`nOutput:`n$($Output -join "`n")"
+    }
+    if ($ExitCode -ne 0) {
+        throw "Shortcut-style launch of $ScriptPath failed with exit code $ExitCode.`nOutput:`n$($Output -join "`n")"
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $ExitCode
+        Output   = @($Output)
+    }
+}
+
 function Invoke-QueScriptWithInput {
     <#
     .SYNOPSIS
@@ -869,7 +934,7 @@ try {
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
             'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable',
-            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Initialize-SyncThing',
+            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
             'Ensure-QueCloneOnWorkBranch',
@@ -997,15 +1062,17 @@ try {
         Write-TestSuccess "Created test .uasset file: $LfsFile"
 
         # Step 5.2: Save work to que/<clone> and publish to main (with default tag)
-        $SavedBranch = Invoke-QueSaveCommand -CloneRoot $SecondClonePath
+        # Run via shortcut-style launch so we test the real user path (que save / que publish).
+        Invoke-QueViaShortcut -CloneRoot $SecondClonePath -QueCommand "save" | Out-Null
+        $SavedBranch = git -C $SecondClonePath rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
         if ($SavedBranch -ne "que/$SecondCloneName") {
             Pop-Location
             Write-TestFailure "Unexpected save branch name. Expected que/$SecondCloneName, got $SavedBranch"
         }
-        Write-TestSuccess "Saved changes on branch: $SavedBranch"
+        Write-TestSuccess "Saved changes via 'que save' on branch: $SavedBranch"
 
-        $PublishedBranch = Invoke-QuePublishCommand -CloneRoot $SecondClonePath -TagName "lkg"
-        Write-TestSuccess "Published branch $PublishedBranch to main and updated tag 'lkg'"
+        Invoke-QueViaShortcut -CloneRoot $SecondClonePath -QueCommand "publish lkg" | Out-Null
+        Write-TestSuccess "Published via 'que publish lkg' to main and updated tag 'lkg'"
 
         # Ensure clone returns to its work branch after publish (new flow)
         Ensure-QueCloneOnWorkBranch -CloneRoot $SecondClonePath -CloneName $SecondCloneName -SkipIfDirty:$true
@@ -1072,12 +1139,15 @@ try {
         }
         Write-TestSuccess "Found workspace 2 shortcut: $Workspace2LnkPath"
 
-        # Execute the script directly (simulates double-clicking the .lnk)
-        Write-Host "Executing workspace 2 launch script..." -ForegroundColor Gray
+        # Launch via the same code path as the .lnk shortcut (dot-source with
+        # $QueLaunchSession). This triggers Mode 3 setup which registers the
+        # current SyncThing device ID by rewriting the script's own device list.
+        Write-Host "Launching workspace 2 via shortcut-style invocation..." -ForegroundColor Gray
         Push-Location $Workspace2ClonePath
 
-        # Run the script and capture output, providing 'exit' to exit the interactive loop
-        $LaunchOutput = "exit" | & powershell.exe -ExecutionPolicy Bypass -File $Workspace2ScriptPath 2>&1
+        $LaunchResult = Invoke-QueViaShortcut -CloneRoot $Workspace2ClonePath
+        $LaunchOutput = $LaunchResult.Output
+        Write-TestSuccess "Shortcut-style launch completed; 'que' function was defined in session"
 
         Pop-Location
 
@@ -1113,10 +1183,10 @@ try {
         }
 
         # Step 6.3: Publish the change using que workflow commands
-        Write-Host "`nStep 6.3: Publishing SyncThing device ID via que workflow" -ForegroundColor Cyan
+        Write-Host "`nStep 6.3: Publishing SyncThing device ID via 'que publish'" -ForegroundColor Cyan
 
-        $PublishedSyncBranch = Invoke-QuePublishCommand -CloneRoot $Workspace2ClonePath
-        Write-TestSuccess "Published device ID change from branch: $PublishedSyncBranch"
+        Invoke-QueViaShortcut -CloneRoot $Workspace2ClonePath -QueCommand "publish" | Out-Null
+        Write-TestSuccess "Published device ID change via 'que publish'"
 
         # Ensure clone returns to its work branch after publish (new flow)
         Ensure-QueCloneOnWorkBranch -CloneRoot $Workspace2ClonePath -CloneName $Workspace2CloneName -SkipIfDirty:$true
@@ -1142,8 +1212,8 @@ try {
 
         Push-Location $Workspace1ClonePath
 
-        Invoke-QueUpdateCommand -CloneRoot $Workspace1ClonePath | Out-Null
-        Write-TestSuccess "Updated workspace 1 with latest main"
+        Invoke-QueViaShortcut -CloneRoot $Workspace1ClonePath -QueCommand "update" | Out-Null
+        Write-TestSuccess "Updated workspace 1 via 'que update'"
 
         # Verify the que script was updated
         $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que57-project.ps1"
@@ -1180,12 +1250,13 @@ try {
         }
         Write-TestSuccess "Found workspace 1 shortcut: $Workspace1LnkPath"
 
-        # Execute the script directly
-        Write-Host "Executing workspace 1 launch script..." -ForegroundColor Gray
+        # Launch via shortcut path to trigger peer addition in Mode 3 setup.
+        Write-Host "Launching workspace 1 via shortcut-style invocation..." -ForegroundColor Gray
         Push-Location $Workspace1ClonePath
 
-        # Run the script and capture output, providing 'exit' to exit the interactive loop
-        $LaunchOutput = "exit" | & powershell.exe -ExecutionPolicy Bypass -File $Workspace1ScriptPath 2>&1
+        $LaunchResult = Invoke-QueViaShortcut -CloneRoot $Workspace1ClonePath
+        $LaunchOutput = $LaunchResult.Output
+        Write-TestSuccess "Shortcut-style launch completed; 'que' function was defined in session"
 
         Pop-Location
 
@@ -1515,8 +1586,8 @@ try {
 
         Push-Location $Workspace1ClonePath
 
-        Invoke-QueUpdateCommand -CloneRoot $Workspace1ClonePath | Out-Null
-        Write-TestSuccess "que update completed successfully"
+        Invoke-QueViaShortcut -CloneRoot $Workspace1ClonePath -QueCommand "update" | Out-Null
+        Write-TestSuccess "'que update' completed successfully"
 
         # Step 8.4: Verify LFS file is checked out (not a pointer)
         Write-Host "`nStep 8.4: Verifying LFS file is properly checked out" -ForegroundColor Cyan
@@ -1617,7 +1688,7 @@ try {
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
             'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable',
-            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Initialize-SyncThing',
+            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
             'Ensure-QueCloneOnWorkBranch',
@@ -1649,8 +1720,14 @@ try {
             Write-TestFailure "Failed to validate GitHub token for clone creation"
         }
 
-        # Create the second clone using que clone (bases on current branch state)
-        Write-Host "Creating second clone in workspace 1 using que clone..." -ForegroundColor Cyan
+        # NOTE: Direct Invoke-QueCloneCommand call is a deliberate "last resort"
+        # here — the real `que clone` user path unconditionally launches the new
+        # clone's .lnk shortcut in a detached window, which would leak a
+        # powershell process and race with subsequent test assertions. -SkipLaunch
+        # is not exposed through the hosted `que` function since real users
+        # always want the new clone to open. The .lnk invocation path is already
+        # covered by Phase 6's Invoke-QueViaShortcut calls.
+        Write-Host "Creating second clone in workspace 1 (direct call with -SkipLaunch)..." -ForegroundColor Cyan
         $NewCloneRoot = Invoke-QueCloneCommand -WorkspaceRoot $script:TestResults.Workspace1Path `
                                               -SourceCloneRoot $Workspace1PrimaryClonePath `
                                               -SkipLaunch
@@ -1752,30 +1829,32 @@ try {
         $SecondaryClonePath = $SecondaryClone.FullName
         $SecondaryCloneName = $SecondaryClone.Name
 
-        # Create change on the primary clone and save to its branch
+        # Create change on the primary clone and save to its branch (via 'que save')
         Push-Location $PrimaryClonePath
         $ImportFile = "import-from-$PrimaryCloneName.txt"
         $ImportContent = "Import test from $PrimaryCloneName at $(Get-Date -Format 'o')"
         Set-Content -Path $ImportFile -Value $ImportContent -Encoding UTF8
-        $PrimaryBranch = Invoke-QueSaveCommand -CloneRoot $PrimaryClonePath
+        Invoke-QueViaShortcut -CloneRoot $PrimaryClonePath -QueCommand "save" | Out-Null
+        $PrimaryBranch = git -C $PrimaryClonePath rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
         if ($PrimaryBranch -ne "que/$PrimaryCloneName") {
             Pop-Location
             Write-TestFailure "Unexpected primary branch name. Expected que/$PrimaryCloneName, got $PrimaryBranch"
         }
-        Write-TestSuccess "Created and saved import change on $PrimaryBranch"
+        Write-TestSuccess "Created and saved import change via 'que save' on $PrimaryBranch"
         Pop-Location
 
-        # Ensure secondary branch exists, then import the primary branch
+        # Ensure secondary branch exists (via 'que save'), then 'que import'
         Push-Location $SecondaryClonePath
-        $SecondaryBranch = Invoke-QueSaveCommand -CloneRoot $SecondaryClonePath
+        Invoke-QueViaShortcut -CloneRoot $SecondaryClonePath -QueCommand "save" | Out-Null
+        $SecondaryBranch = git -C $SecondaryClonePath rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
         if ($SecondaryBranch -ne "que/$SecondaryCloneName") {
             Pop-Location
             Write-TestFailure "Unexpected secondary branch name. Expected que/$SecondaryCloneName, got $SecondaryBranch"
         }
-        Write-TestSuccess "Ensured secondary branch exists: $SecondaryBranch"
+        Write-TestSuccess "Ensured secondary branch exists via 'que save': $SecondaryBranch"
 
-        Invoke-QueImportCommand -CloneRoot $SecondaryClonePath -Name $PrimaryCloneName
-        Write-TestSuccess "Imported que/$PrimaryCloneName into $SecondaryBranch"
+        Invoke-QueViaShortcut -CloneRoot $SecondaryClonePath -QueCommand "import $PrimaryCloneName" | Out-Null
+        Write-TestSuccess "Imported que/$PrimaryCloneName into $SecondaryBranch via 'que import'"
 
         $ImportedFilePath = Join-Path $SecondaryClonePath $ImportFile
         if (-not (Test-Path $ImportedFilePath)) {
@@ -1784,12 +1863,13 @@ try {
         }
         Write-TestSuccess "Imported file present in secondary clone: $ImportedFilePath"
 
-        $PostImportBranch = Invoke-QueSaveCommand -CloneRoot $SecondaryClonePath
+        Invoke-QueViaShortcut -CloneRoot $SecondaryClonePath -QueCommand "save" | Out-Null
+        $PostImportBranch = git -C $SecondaryClonePath rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
         if ($PostImportBranch -ne $SecondaryBranch) {
             Pop-Location
             Write-TestFailure "Post-import save returned unexpected branch. Expected $SecondaryBranch, got $PostImportBranch"
         }
-        Write-TestSuccess "Saved imported changes on branch: $PostImportBranch"
+        Write-TestSuccess "Saved imported changes via 'que save' on branch: $PostImportBranch"
         Pop-Location
 
         Write-TestSuccess "Multiple clones test completed successfully"
