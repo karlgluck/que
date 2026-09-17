@@ -4,12 +4,12 @@
 
 .DESCRIPTION
     Test-Que.ps1 performs comprehensive testing of que57.ps1, validating the full
-    golden path workflow including GitHub repository creation, workspace initialization,
+    golden path workflow including forge repository creation, workspace initialization,
     SyncThing synchronization, and Git LFS operations.
 
     CURRENT CAPABILITIES:
     - Validates environment (PowerShell, Git, Git LFS, SyncThing)
-    - Checks GitHub token validity and permissions
+    - Checks forge token validity and permissions
     - Ensures test repository doesn't already exist (prevents conflicts)
     - Creates isolated test environment in temp directory
     - Creates first QUE workspace by calling que57.ps1 functions directly
@@ -38,14 +38,19 @@
 .PARAMETER TestRootPath
     Optional override for the temp folder location where test workspaces will be created.
 
-.PARAMETER GitHubToken
-    GitHub Personal Access Token with repo creation permissions. If not provided,
-    the script will check the QUE_TEST_GITHUB_PAT environment variable, or prompt
-    securely and save the token to that session variable for this PowerShell session.
+.PARAMETER Token
+    Access token with repository-creation rights on the forge under test (GitHub: 'repo';
+    Forgejo/Gitea: write:user + write:repository). If not provided, the script checks the
+    QUE_TEST_TOKEN environment variable, or prompts securely and saves the token to that
+    session variable for this PowerShell session. -Token is accepted as an alias.
+
+.PARAMETER ForgeHost
+    Forge under test: github.com (default) or a Forgejo/Gitea hostname. Also read from the
+    QUE_TEST_FORGE_HOST environment variable. -GitHost is accepted as an alias.
 
 .PARAMETER AutoApprove
     Run in non-interactive mode; automatically answer all prompts and clean up every artifact,
-    including the remote GitHub repository.
+    including the remote forge repository.
 
 .PARAMETER KeepArtifacts
     Skip cleanup prompts and keep all test artifacts for inspection.
@@ -54,9 +59,9 @@
     Timeout in seconds to wait for SyncThing synchronization operations. Default is 60.
 
 .EXAMPLE
-    .\Test-Que.ps1 -GitHubToken "ghp_xxxxx"
+    .\Test-Que.ps1 -Token "ghp_xxxxx"
 
-    Runs the full test suite using the specified GitHub token.
+    Runs the full test suite using the specified forge token.
 
 .EXAMPLE
     .\Test-Que.ps1 -WhatIf
@@ -69,7 +74,7 @@
     Runs tests and keeps all artifacts without prompting for cleanup.
 
 .EXAMPLE
-    .\Test-Que.ps1 -GitHubToken "ghp_xxxxx" -AutoApprove
+    .\Test-Que.ps1 -Token "ghp_xxxxx" -AutoApprove
 
     Runs the full test suite without interactive prompts and removes the test artifacts afterward.
 
@@ -77,7 +82,7 @@
     git bisect start
     git bisect bad HEAD
     git bisect good v1.0
-    git bisect run pwsh -File Test-Que.ps1 -GitHubToken "ghp_xxxxx" -KeepArtifacts
+    git bisect run pwsh -File Test-Que.ps1 -Token "ghp_xxxxx" -KeepArtifacts
 
     Uses git bisect to find the first bad commit, running this test at each step.
 
@@ -101,7 +106,12 @@ param(
     [string]$TestRootPath,
 
     [Parameter(Mandatory=$false)]
-    [string]$GitHubToken,
+    [Alias('GitHubToken')]
+    [string]$Token,
+
+    [Parameter(Mandatory=$false)]
+    [Alias('GitHost')]
+    [string]$ForgeHost = "github.com",
 
     [Parameter(Mandatory=$false)]
     [switch]$AutoApprove,
@@ -112,6 +122,10 @@ param(
     [Parameter(Mandatory=$false)]
     [int]$Timeout = 60
 )
+
+# Absolute path of the script under test, kept in its own name: PowerShell variable names are case-insensitive,
+# so $script:queScript (the script's *content*, needed by New-QueRepoScript) is the same variable as $QueScript.
+$script:QueScriptPath = (Resolve-Path $QueScript -ErrorAction Stop).Path
 
 # Script-level variables
 $script:TestRoot = $null
@@ -126,8 +140,8 @@ $script:TestResults = @{
     Workspace1CloneName = $null
     Workspace2CloneName = $null
     SyncThingPIDs = @()
-    GitHubRepoName = "test-que-demo-repo"
-    GitHubUser = $null
+    ForgeRepoName = "test-que-demo-repo"
+    ForgeUser = $null
     TestRootPath = $null
 }
 $script:InitialSyncThingPIDs = @()
@@ -135,8 +149,17 @@ $script:InitialSyncThingPIDs = @()
 $script:NonInteractive = $AutoApprove.IsPresent
 if ($script:NonInteractive) {
     Write-Host "Non-interactive mode enabled; prompts will be auto-approved." -ForegroundColor Gray
-    $KeepArtifacts = $false
+    if ($KeepArtifacts) { Write-Host "Artifacts will be kept (-KeepArtifacts)." -ForegroundColor Gray }
 }
+
+# Git host under test (github.com or a Forgejo/Gitea server); mirrors Initialize-QueForgeConfig in que57.ps1
+if (-not $PSBoundParameters.ContainsKey('ForgeHost') -and -not $PSBoundParameters.ContainsKey('GitHost') -and $env:QUE_TEST_FORGE_HOST) { $ForgeHost = $env:QUE_TEST_FORGE_HOST }
+# Kept in a script-scoped variable so nothing dot-sourced later can shadow it.
+$script:TestForgeHost = ($ForgeHost.Trim().ToLowerInvariant() -replace '^https?://', '' -replace '/.*$', '')
+$script:TestIsGitHub = ($script:TestForgeHost -eq 'github.com')
+$script:TestApiBase = if ($script:TestIsGitHub) { 'https://api.github.com' } else { "https://$($script:TestForgeHost)/api/v1" }
+$script:TestWebBase = "https://$($script:TestForgeHost)"
+Write-Host "Forge under test: $($script:TestForgeHost)" -ForegroundColor Gray
 
 # Preload CIM cmdlets to avoid WhatIf noise from module alias setup.
 $savedWhatIfPreference = $WhatIfPreference
@@ -192,6 +215,128 @@ function Write-TestSuccess {
     $script:TestResults.StepsCompleted++
 }
 
+function Invoke-Cleanup {
+    Write-Host "`n============================================" -ForegroundColor Yellow
+    Write-Host "CLEANUP" -ForegroundColor Yellow
+    Write-Host "============================================`n" -ForegroundColor Yellow
+
+    # Stop SyncThing processes started by this test
+    $syncProcesses = Get-Process -Name "syncthing" -ErrorAction SilentlyContinue
+    if ($syncProcesses) {
+        $instanceCount = Get-SyncThingProcessCount
+        $testSyncPids = @($script:TestResults.SyncThingPIDs)
+        # Also catch instances the test started but never recorded (e.g. failure mid-phase): match on the test root path
+        if ($script:TestRoot) {
+            $rootPath = "$($script:TestRoot)"
+            $byCmd = @(Get-CimInstance Win32_Process -Filter "name='syncthing.exe'" -ErrorAction SilentlyContinue |
+                       Where-Object { $_.CommandLine -like "*$rootPath*" } | ForEach-Object { [int]$_.ProcessId })
+            $testSyncPids = @(@($testSyncPids) + $byCmd | Where-Object { $_ } | Select-Object -Unique)
+        }
+        Write-Host "Found $instanceCount SyncThing instance(s) running ($($syncProcesses.Count) processes total)" -ForegroundColor Yellow
+        if (-not $testSyncPids -or $testSyncPids.Count -eq 0) {
+            Write-Host "No SyncThing processes associated with this test were detected." -ForegroundColor Gray
+        }
+        elseif (-not $KeepArtifacts) {
+            if ($script:NonInteractive) {
+                Write-Host "Non-interactive mode: stopping SyncThing processes without prompting." -ForegroundColor Gray
+                $stopSync = 'y'
+            }
+            else {
+                $stopSync = Read-Host "Stop SyncThing processes started by this test? (y/N)"
+            }
+            if ($stopSync -eq 'y' -or $stopSync -eq 'Y') {
+                foreach ($procId in $testSyncPids) {
+                    $proc = $syncProcesses | Where-Object { $_.Id -eq $procId } | Select-Object -First 1
+                    if ($proc -and $PSCmdlet.ShouldProcess("SyncThing (PID: $($proc.Id))", "stop process")) {
+                        Stop-Process -Id $proc.Id -Force
+                        Write-Host "Stopped SyncThing process: $($proc.Id)" -ForegroundColor Green
+                    }
+                }
+
+                if (-not (Wait-ForProcessExit -ProcessIds $testSyncPids -TimeoutSeconds 15 -PollIntervalSeconds 1)) {
+                    Write-Host "WARNING: SyncThing processes may still be exiting; cleanup might fail." -ForegroundColor Yellow
+                }
+            }
+        }
+    }
+
+    # Local cleanup
+    if ($script:TestRoot -and (Test-Path $script:TestRoot)) {
+        if (-not $KeepArtifacts) {
+            Write-Host "`nTest workspace location: $($script:TestRoot.FullName)" -ForegroundColor Cyan
+            if ($script:NonInteractive) {
+                Write-Host "Non-interactive mode: deleting local workspace without prompting." -ForegroundColor Gray
+                $deleteLocal = 'y'
+            }
+            else {
+                $deleteLocal = Read-Host "Delete local test workspace? (y/N)"
+            }
+            if ($deleteLocal -eq 'y' -or $deleteLocal -eq 'Y') {
+                if ($PSCmdlet.ShouldProcess($script:TestRoot.FullName, "delete directory")) {
+                    try {
+                        Remove-Item -Path $script:TestRoot.FullName -Recurse -Force
+                        Write-Host "Deleted test workspace" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Host "Failed to delete test workspace: $_" -ForegroundColor Red
+                        Write-Host "You may need to manually delete: $($script:TestRoot.FullName)" -ForegroundColor Yellow
+                    }
+                }
+            }
+            else {
+                Write-Host "Test workspace preserved at: $($script:TestRoot.FullName)" -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "Keeping test artifacts at: $($script:TestRoot.FullName)" -ForegroundColor Yellow
+        }
+    }
+
+    # Forge cleanup
+    $repoUrl = "$script:TestWebBase/$($script:TestResults.ForgeUser)/$($script:TestResults.ForgeRepoName)"
+    $repoExists = Test-ForgeRepoExists -RepoName $script:TestResults.ForgeRepoName -Token $Token -Owner $script:TestResults.ForgeUser
+
+    if ($repoExists) {
+        if (-not $KeepArtifacts) {
+            Write-Host "`nforge repository: $repoUrl" -ForegroundColor Cyan
+            if ($script:NonInteractive) {
+                Write-Host "Non-interactive mode: deleting forge repository without prompting." -ForegroundColor Gray
+                $deleteRemote = 'y'
+            }
+            else {
+                $deleteRemote = Read-Host "Delete forge repository '$($script:TestResults.ForgeRepoName)'? (y/N)"
+            }
+            if ($deleteRemote -eq 'y' -or $deleteRemote -eq 'Y') {
+                if ($PSCmdlet.ShouldProcess($script:TestResults.ForgeRepoName, "delete from the forge")) {
+                    try {
+                        $headers = @{
+                            Authorization = "token $Token"
+                            Accept = "application/vnd.github.v3+json"
+                        }
+                        $deleteUrl = "$script:TestApiBase/repos/$($script:TestResults.ForgeUser)/$($script:TestResults.ForgeRepoName)"
+                        Invoke-RestMethod -Method Delete -Uri $deleteUrl -Headers $headers -ErrorAction Stop
+                        Write-Host "Deleted forge repository: $repoUrl" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Host "Failed to delete forge repository: $_" -ForegroundColor Red
+                        Write-Host "You may need to manually delete: $repoUrl/settings" -ForegroundColor Yellow
+                    }
+                }
+            }
+            else {
+                Write-Host "forge repository preserved at: $repoUrl" -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "forge repository preserved at: $repoUrl" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host "`n============================================" -ForegroundColor Yellow
+    Write-Host "CLEANUP COMPLETE" -ForegroundColor Yellow
+    Write-Host "============================================`n" -ForegroundColor Yellow
+}
+
 function Write-TestFailure {
     <#
     .SYNOPSIS
@@ -225,6 +370,11 @@ function Write-TestFailure {
     Write-Host "Error: $Message"
     Write-Host "============================================`n" -ForegroundColor Red
 
+    # Leave nothing behind unless artifacts were explicitly requested
+    if (-not $script:InCleanup) {
+        $script:InCleanup = $true
+        try { Invoke-Cleanup } catch { Write-Host "Cleanup after failure hit an error: $_" -ForegroundColor Yellow }
+    }
     exit $ExitCode
 }
 
@@ -402,6 +552,111 @@ function Wait-ForProcessExit {
     return $false
 }
 
+function Assert-PlainAsciiScript {
+    <#
+    .SYNOPSIS
+        Fails if a script file has a UTF-8 BOM or any non-ASCII byte (Windows PowerShell 5.1 reads BOM-less files as ANSI).
+    #>
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw "$Path starts with a UTF-8 BOM"
+    }
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        if ($bytes[$i] -gt 0x7F -or ($bytes[$i] -lt 0x20 -and $bytes[$i] -notin 9, 10, 13)) { throw "$Path contains a non-ASCII or control byte at offset $i" }
+    }
+}
+
+function Get-QueGeneratedConstants {
+    <#
+    .SYNOPSIS
+        Reads the ###QUE_CONSTANTS### block of a generated que57-project.ps1 without executing it.
+    #>
+    param([Parameter(Mandatory=$true)][string]$ScriptPath)
+    $text = Get-Content -Path $ScriptPath -Raw
+    $get = { param($name) if ($text -match ('(?m)^\$' + $name + '\s*=\s*"([^"]*)"')) { $matches[1] } else { $null } }
+    return [pscustomobject]@{
+        ForgeHost = & $get 'QueForgeHost'
+        Owner     = & $get 'QueForgeOwner'
+        Repo      = & $get 'QueForgeRepo'
+        UEVersion = & $get 'QueUnrealEngineVersion'
+    }
+}
+
+function Get-QueShortcutCommand {
+    <#
+    .SYNOPSIS
+        Returns the -Command payload of the real open-<clone>.lnk so launches mirror the shortcut exactly.
+    #>
+    param([Parameter(Mandatory=$true)][string]$CloneRoot)
+    $CloneName = Split-Path $CloneRoot -Leaf
+    $WorkspaceRoot = Split-Path (Split-Path $CloneRoot -Parent) -Parent
+    $LnkPath = Join-Path $WorkspaceRoot "open-$CloneName.lnk"
+    if (-not (Test-Path $LnkPath)) { throw "Shortcut not found: $LnkPath" }
+    $Arguments = (New-Object -ComObject WScript.Shell).CreateShortcut($LnkPath).Arguments
+    if ($Arguments -notmatch '-Command\s+"(.*)"\s*$') { throw "Unexpected shortcut arguments: $Arguments" }
+    $Payload = $matches[1]
+    if ($Payload -match '&\s*\{') { throw "Shortcut wraps the dot-source in a scriptblock, which drops que's helper functions: $Arguments" }
+    if ($Payload -notmatch 'QueLaunchSession') { throw "Shortcut does not set QueLaunchSession: $Arguments" }
+    return $Payload
+}
+
+function Invoke-QueWorkspaceCreation {
+    <#
+    .SYNOPSIS
+        Runs New-QueWorkspace in a child PowerShell process (the script under test never loads into this session for mutation).
+    .DESCRIPTION
+        The child dot-sources the given script, applies the forge host, overrides Get-UserSelectionIndex
+        for automation, validates the token and calls New-QueWorkspace. The token travels via an
+        environment variable, never on the command line. Output is streamed and logged.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$ScriptPath,
+        [Parameter(Mandatory=$true)][string]$Owner,
+        [Parameter(Mandatory=$true)][string]$Repo,
+        [Parameter(Mandatory=$true)][string]$Token,
+        [Parameter(Mandatory=$true)][string]$ForgeHost,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory
+    )
+    $ResolvedScript = (Resolve-Path $ScriptPath -ErrorAction Stop).Path
+    $EscScript = $ResolvedScript -replace "'", "''"
+    $EscDir    = $WorkingDirectory -replace "'", "''"
+    $Driver = @"
+Set-Location '$EscDir'
+. '$EscScript'
+Initialize-QueForgeConfig -ForgeHost '$ForgeHost'
+`$script:queScript = Get-Content -Path '$EscScript' -Raw -Encoding UTF8
+function Get-UserSelectionIndex { param([string[]]`$Options, [int]`$Default, [switch]`$DontShortcutSingleChoice) Write-Host "[Test automation] Auto-selecting: `$(`$Options[0])" -ForegroundColor Gray; return 0 }
+`$UserInfo = Test-ForgeToken -Token `$env:QUE_TEST_CHILD_TOKEN
+if (-not `$UserInfo) { Write-Host 'QUETEST_FAIL_TOKEN' -ForegroundColor Red; exit 97 }
+try {
+    New-QueWorkspace -ForgeOwner '$Owner' -ForgeRepo '$Repo' -Token `$env:QUE_TEST_CHILD_TOKEN -UserInfo `$UserInfo
+} catch {
+    Write-Host "QUETEST_FAIL_EXCEPTION: `$(`$_.Exception.Message)" -ForegroundColor Red
+    exit 98
+}
+exit 0
+"@
+    $DriverFile = Join-Path ([System.IO.Path]::GetTempPath()) ("que-test-driver-" + [guid]::NewGuid().ToString('N') + ".ps1")
+    [System.IO.File]::WriteAllText($DriverFile, $Driver, [System.Text.Encoding]::ASCII)
+    $env:QUE_TEST_CHILD_TOKEN = $Token
+    try {
+        $Output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $DriverFile 2>&1
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:QUE_TEST_CHILD_TOKEN = $null
+        Remove-Item $DriverFile -Force -ErrorAction SilentlyContinue
+    }
+    $Output | ForEach-Object { Write-Host "  [workspace] $_" -ForegroundColor DarkGray }
+    if ($script:TestRoot) {
+        $logFile = Join-Path $script:TestRoot "test-que-log.txt"
+        $Output | ForEach-Object { Add-Content -Path $logFile -Value "[workspace] $_" }
+    }
+    if ($ExitCode -eq 97) { throw "Token validation failed inside the workspace-creation child process" }
+    if ($ExitCode -ne 0) { throw "Workspace creation failed (exit $ExitCode).`n$($Output -join "`n")" }
+}
+
 function Invoke-QueViaShortcut {
     <#
     .SYNOPSIS
@@ -434,13 +689,14 @@ function Invoke-QueViaShortcut {
 
     $EscClone  = $CloneRoot  -replace "'", "''"
     $EscScript = $ScriptPath -replace "'", "''"
+    # Use the real shortcut's -Command payload so the test launches exactly what the .lnk does
+    $ShortcutCommand = Get-QueShortcutCommand -CloneRoot $CloneRoot
 
     # Inner command mirrors New-WindowsShortcut's arguments: dot-source with the
     # $QueLaunchSession sentinel so the entry-point guard runs Invoke-QueMain.
     $Inner = @"
 Set-Location '$EscClone'
-`$QueLaunchSession = `$true
-. '$EscScript'
+$ShortcutCommand
 if (-not (Get-Command que -CommandType Function -ErrorAction SilentlyContinue)) {
     Write-Host 'QUETEST_FAIL_NO_QUE_FUNCTION' -ForegroundColor Red
     exit 97
@@ -465,6 +721,69 @@ if (-not (Get-Command que -CommandType Function -ErrorAction SilentlyContinue)) 
         ExitCode = $ExitCode
         Output   = @($Output)
     }
+}
+
+function Get-QueCompletionsViaShortcut {
+    <#
+    .SYNOPSIS
+        Returns tab completion texts from the real shortcut-style QUE session.
+    .PARAMETER CloneRoot
+        The clone directory whose que57-project.ps1 should be launched.
+    .PARAMETER InputScript
+        The command line text to pass to TabExpansion2.
+    .PARAMETER CursorColumn
+        Optional cursor position. Defaults to the end of InputScript.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$CloneRoot,
+        [Parameter(Mandatory=$true)][string]$InputScript,
+        [int]$CursorColumn = -1
+    )
+
+    $ScriptPath = Join-Path $CloneRoot "que57-project.ps1"
+    if (-not (Test-Path $ScriptPath)) {
+        throw "que57-project.ps1 not found at: $ScriptPath"
+    }
+
+    if ($CursorColumn -lt 0) {
+        $CursorColumn = $InputScript.Length
+    }
+
+    $EscClone = $CloneRoot -replace "'", "''"
+    $EscScript = $ScriptPath -replace "'", "''"
+    $ShortcutCommand = Get-QueShortcutCommand -CloneRoot $CloneRoot
+    $EscInput = $InputScript -replace "'", "''"
+
+    $Inner = @"
+Set-Location '$EscClone'
+$ShortcutCommand
+if (-not (Get-Command que -CommandType Function -ErrorAction SilentlyContinue)) {
+    Write-Host 'QUETEST_FAIL_NO_QUE_FUNCTION' -ForegroundColor Red
+    exit 97
+}
+`$Results = TabExpansion2 -InputScript '$EscInput' -CursorColumn $CursorColumn
+`$CompletionTexts = @(`$Results.CompletionMatches | ForEach-Object { `$_.CompletionText })
+Write-Output ('QUETEST_COMPLETIONS=' + (ConvertTo-Json -InputObject @(`$CompletionTexts) -Compress))
+exit 0
+"@
+
+    $Output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Inner 2>&1
+    $ExitCode = $LASTEXITCODE
+
+    if ($ExitCode -eq 97) {
+        throw "Shortcut-style launch did NOT inject `que` function into the session. This means Mode 3 setup never ran (entry-point guard broken?). Script: $ScriptPath`nOutput:`n$($Output -join "`n")"
+    }
+    if ($ExitCode -ne 0) {
+        throw "Shortcut-style completion query for $ScriptPath failed with exit code $ExitCode.`nOutput:`n$($Output -join "`n")"
+    }
+
+    $JsonLine = $Output | Where-Object { $_ -like 'QUETEST_COMPLETIONS=*' } | Select-Object -Last 1
+    if (-not $JsonLine) {
+        throw "Completion query did not return a parseable payload.`nOutput:`n$($Output -join "`n")"
+    }
+
+    $JsonPayload = $JsonLine.Substring('QUETEST_COMPLETIONS='.Length)
+    return @((ConvertFrom-Json -InputObject $JsonPayload) | ForEach-Object { "$_" })
 }
 
 function Invoke-QueScriptWithInput {
@@ -515,10 +834,10 @@ Get-Content '$InputFile' | & '$ScriptPath'
     }
 }
 
-function Test-GitHubRepoExists {
+function Test-ForgeRepoExists {
     <#
     .SYNOPSIS
-        Checks if a GitHub repository exists.
+        Checks if a forge repository exists.
     #>
     param(
         [Parameter(Mandatory=$true)]
@@ -537,7 +856,7 @@ function Test-GitHubRepoExists {
             Accept = "application/vnd.github.v3+json"
         }
 
-        $url = "https://api.github.com/repos/$Owner/$RepoName"
+        $url = "$script:TestApiBase/repos/$Owner/$RepoName"
         $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
         return $true
     }
@@ -550,7 +869,7 @@ function Test-GitHubRepoExists {
     }
 }
 
-function Get-GitHubUser {
+function Get-ForgeUser {
     <#
     .SYNOPSIS
         Gets the authenticated GitHub user information.
@@ -566,7 +885,7 @@ function Get-GitHubUser {
             Accept = "application/vnd.github.v3+json"
         }
 
-        $url = "https://api.github.com/user"
+        $url = "$script:TestApiBase/user"
         $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
         return $response
     }
@@ -597,6 +916,16 @@ if (-not (Test-Path $QueScript)) {
     Write-TestFailure "que57.ps1 not found at path: $QueScript" -ExitCode 3
 }
 Write-TestSuccess "que57.ps1 found"
+
+Write-TestStep "Verifying scripts are BOM-free ASCII"
+try {
+    Assert-PlainAsciiScript -Path $script:QueScriptPath
+    Assert-PlainAsciiScript -Path $PSCommandPath
+    Write-TestSuccess "que57.ps1 and Test-Que.ps1 are BOM-free ASCII"
+}
+catch {
+    Write-TestFailure "Script encoding check failed: $_" -ExitCode 3
+}
 
 Write-TestStep "Verifying Git installation"
 try {
@@ -650,51 +979,67 @@ if (-not $syncthingFound) {
 }
 
 # Step 1.2: GitHub Token Acquisition
-Write-TestStep "Acquiring GitHub token"
-if (-not $GitHubToken) {
+Write-TestStep "Acquiring forge token"
+if (-not $Token) {
     # Try to get token from environment variable
-    if ($env:QUE_TEST_GITHUB_PAT) {
-        $GitHubToken = $env:QUE_TEST_GITHUB_PAT
-        Write-Host "Using GitHub PAT from environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Gray
+    if (-not $env:QUE_TEST_TOKEN -and $env:QUE_TEST_TOKEN) { $env:QUE_TEST_TOKEN = $env:QUE_TEST_TOKEN }
+    if ($env:QUE_TEST_TOKEN) {
+        $Token = $env:QUE_TEST_TOKEN
+        Write-Host "Using forge token from environment variable QUE_TEST_TOKEN" -ForegroundColor Gray
     }
     else {
         if ($script:NonInteractive) {
-            Write-TestFailure "GitHub token must be provided using -GitHubToken or QUE_TEST_GITHUB_PAT when running in non-interactive mode" -ExitCode 3
+            Write-TestFailure "forge token must be provided using -Token or QUE_TEST_TOKEN when running in non-interactive mode" -ExitCode 3
         }
-        Write-Host "GitHub Personal Access Token is required for testing." -ForegroundColor Yellow
+        Write-Host "forge access token is required for testing." -ForegroundColor Yellow
         Write-Host "The token needs 'repo' permissions to create and delete repositories." -ForegroundColor Yellow
-        Write-Host "To avoid re-entering the token in this session, it will be saved to environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Yellow
-        $secureToken = Read-Host "Enter GitHub PAT" -AsSecureString
+        Write-Host "To avoid re-entering the token in this session, it will be saved to environment variable QUE_TEST_TOKEN" -ForegroundColor Yellow
+        $secureToken = Read-Host "Enter forge token" -AsSecureString
         $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
-        $GitHubToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        $Token = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
         # Save to session environment variable for this PowerShell session only
-        $env:QUE_TEST_GITHUB_PAT = $GitHubToken
-        Write-Host "GitHub PAT saved to session environment variable QUE_TEST_GITHUB_PAT" -ForegroundColor Green
+        $env:QUE_TEST_TOKEN = $Token
+        Write-Host "forge token saved to session environment variable QUE_TEST_TOKEN" -ForegroundColor Green
     }
 }
 
-if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
-    Write-TestFailure "GitHub token is required but was not provided" -ExitCode 3
+if ([string]::IsNullOrWhiteSpace($Token)) {
+    Write-TestFailure "forge token is required but was not provided" -ExitCode 3
 }
 
-Write-TestStep "Validating GitHub token"
+Write-TestStep "Validating forge token"
 try {
-    $user = Get-GitHubUser -Token $GitHubToken
-    $script:TestResults.GitHubUser = $user.login
-    Write-TestSuccess "GitHub token is valid. Authenticated as: $($user.login)"
+    $user = Get-ForgeUser -Token $Token
+    $script:TestResults.ForgeUser = $user.login
+    Write-TestSuccess "forge token is valid. Authenticated as: $($user.login)"
 }
 catch {
-    Write-TestFailure "GitHub token validation failed: $_" -ExitCode 3
+    Write-TestFailure "forge token validation failed: $_" -ExitCode 3
+}
+if (-not $script:TestIsGitHub) {
+    # Forgejo/Gitea tokens are scoped; creating and deleting the test repo needs write:user + write:repository
+    Write-TestStep "Checking token scopes on $($script:TestForgeHost)"
+    try {
+        $tokens = Invoke-RestMethod -Uri "$script:TestApiBase/users/$($user.login)/tokens" -Headers @{ Authorization = "token $Token" } -ErrorAction Stop
+        $mine = @($tokens | Where-Object { $Token.EndsWith($_.token_last_eight) }) | Select-Object -First 1
+        if (-not $mine) { throw "could not find this token in the account's token list" }
+        $missing = @('write:user', 'write:repository') | Where-Object { $mine.scopes -notcontains $_ }
+        if ($missing) { Write-TestFailure "Token '$($mine.name)' is missing scope(s): $($missing -join ', ')" -ExitCode 3 }
+        Write-TestSuccess "Token '$($mine.name)' has scopes: $($mine.scopes -join ', ')"
+    }
+    catch {
+        Write-Host "WARNING: could not verify token scopes ($_). Continuing." -ForegroundColor Yellow
+    }
 }
 
 # Step 1.3: Pre-condition Validation
 Write-TestStep "Checking if test repository already exists"
-$repoExists = Test-GitHubRepoExists -RepoName $script:TestResults.GitHubRepoName -Token $GitHubToken -Owner $script:TestResults.GitHubUser
+$repoExists = Test-ForgeRepoExists -RepoName $script:TestResults.ForgeRepoName -Token $Token -Owner $script:TestResults.ForgeUser
 
 if ($repoExists) {
-    $repoUrl = "https://github.com/$($script:TestResults.GitHubUser)/$($script:TestResults.GitHubRepoName)"
+    $repoUrl = "$script:TestWebBase/$($script:TestResults.ForgeUser)/$($script:TestResults.ForgeRepoName)"
     Write-Host "`nWARNING: Test repository already exists!" -ForegroundColor Yellow
     Write-Host "Repository: $repoUrl" -ForegroundColor Yellow
 
@@ -705,24 +1050,24 @@ if ($repoExists) {
             $deleteExisting = 'y'
         }
         else {
-            $deleteExisting = Read-Host "Delete existing repository '$($script:TestResults.GitHubRepoName)'? (y/N)"
+            $deleteExisting = Read-Host "Delete existing repository '$($script:TestResults.ForgeRepoName)'? (y/N)"
         }
 
         if ($deleteExisting -eq 'y' -or $deleteExisting -eq 'Y') {
-            if ($PSCmdlet.ShouldProcess($script:TestResults.GitHubRepoName, "delete from GitHub")) {
+            if ($PSCmdlet.ShouldProcess($script:TestResults.ForgeRepoName, "delete from the forge")) {
                 Write-Host "Deleting existing repository..." -ForegroundColor Cyan
                 try {
                     $headers = @{
-                        Authorization = "token $GitHubToken"
+                        Authorization = "token $Token"
                         Accept = "application/vnd.github.v3+json"
                     }
-                    $deleteUrl = "https://api.github.com/repos/$($script:TestResults.GitHubUser)/$($script:TestResults.GitHubRepoName)"
+                    $deleteUrl = "$script:TestApiBase/repos/$($script:TestResults.ForgeUser)/$($script:TestResults.ForgeRepoName)"
                     Invoke-RestMethod -Method Delete -Uri $deleteUrl -Headers $headers -ErrorAction Stop
-                    Write-TestSuccess "Deleted existing GitHub repository: $repoUrl"
+                    Write-TestSuccess "Deleted existing forge repository: $repoUrl"
                     $repoExists = $false
                 }
                 catch {
-                    Write-TestFailure "Failed to delete GitHub repository: $_`nPlease delete manually: $repoUrl/settings" -ExitCode 2
+                    Write-TestFailure "Failed to delete forge repository: $_`nPlease delete manually: $repoUrl/settings" -ExitCode 2
                 }
             }
         }
@@ -733,7 +1078,7 @@ if ($repoExists) {
         Write-Host "  1. Visit: $repoUrl/settings" -ForegroundColor Yellow
         Write-Host "  2. Scroll to 'Danger Zone'" -ForegroundColor Yellow
         Write-Host "  3. Click 'Delete this repository'" -ForegroundColor Yellow
-        Write-Host "`nOr use the GitHub CLI: gh repo delete $($script:TestResults.GitHubUser)/$($script:TestResults.GitHubRepoName)`n" -ForegroundColor Yellow
+        Write-Host "`nOr delete it through the forge API." -ForegroundColor Yellow
         Write-TestFailure "Pre-condition failed: Test repository already exists at $repoUrl" -ExitCode 2
     }
 }
@@ -787,6 +1132,7 @@ Write-TestStep "Phase 3: Creating first workspace"
 # Dot-source que57.ps1 to access its functions directly
 Write-Host "Loading que57.ps1 functions..." -ForegroundColor Cyan
 . $QueScript
+Initialize-QueForgeConfig -ForgeHost $script:TestForgeHost
 
 # Load que57.ps1 content into $queScript variable (required by New-QueRepoScript)
 $script:queScript = Get-Content -Path $QueScript -Raw -Encoding UTF8
@@ -810,12 +1156,12 @@ try {
         $testRootPushed = $true
 
         # Create test user info object
-        $TestUser = Test-GitHubPAT -PlainPAT $GitHubToken
+        $TestUser = Test-ForgeToken -Token $Token
         if (-not $TestUser) {
-            Write-TestFailure "Failed to validate GitHub token for workspace creation"
+            Write-TestFailure "Failed to validate forge token for workspace creation"
         }
 
-        Write-TestSuccess "Validated GitHub token for user: $($TestUser.login)"
+        Write-TestSuccess "Validated forge token for user: $($TestUser.login)"
 
         # Create workspace directory and change to it
         $Workspace1Name = "workspace-1"
@@ -825,17 +1171,19 @@ try {
 
         Write-Host "Creating workspace at: $Workspace1Path" -ForegroundColor Cyan
 
-        # Call New-QueWorkspace function directly (from dot-sourced que57.ps1)
-        New-QueWorkspace -GitHubOwner $TestUser.login `
-                         -GitHubRepo $script:TestResults.GitHubRepoName `
-                         -PlainPAT $GitHubToken `
-                         -UserInfo $TestUser
+        # Create the workspace in a child PowerShell so que57.ps1 never runs inside this test's scope
+        Invoke-QueWorkspaceCreation -ScriptPath $script:QueScriptPath -Owner $TestUser.login -Repo $script:TestResults.ForgeRepoName -Token $Token -ForgeHost $script:TestForgeHost -WorkingDirectory $Workspace1Path
 
         # Validate workspace was created
         if (-not (Test-Path "$Workspace1Path\.que")) {
             Write-TestFailure "Workspace .que folder not created"
         }
         Write-TestSuccess "Workspace .que folder created"
+        $StoredHost = Get-Content "$Workspace1Path\.que\forge-host" -ErrorAction SilentlyContinue
+        if ($StoredHost -ne $script:TestForgeHost) {
+            Write-TestFailure "Workspace .que/forge-host is '$StoredHost', expected '$($script:TestForgeHost)'"
+        }
+        Write-TestSuccess "Workspace remembers git host: $StoredHost"
 
         if (-not (Test-Path "$Workspace1Path\repo")) {
             Write-TestFailure "Workspace repo folder not created"
@@ -929,8 +1277,8 @@ try {
         # Remove functions from que57.ps1 to avoid conflicts (unload the namespace)
         # Get list of functions that were defined by que57.ps1
         $FunctionsToRemove = @(
-            'Find-QueWorkspace', 'Get-AvailableSyncThingPort', 'Get-SecureGitHubPAT',
-            'Set-SecureGitHubPAT', 'Store-GitCredentials', 'Test-GitHubPAT',
+            'Find-QueWorkspace', 'Get-AvailableSyncThingPort', 'Get-SecureForgeToken',
+            'Set-SecureForgeToken', 'Store-GitCredentials', 'Test-ForgeToken',
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
             'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable',
@@ -938,6 +1286,7 @@ try {
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
             'Ensure-QueCloneOnWorkBranch',
+            'Initialize-QueForgeConfig', 'Get-QueCloneUrl', 'Import-QueWorkspaceForge', 'Expand-QueReadme', 'Write-QueTokenError',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain'
         )
 
@@ -948,31 +1297,16 @@ try {
         }
         Write-Host "Unloaded que57.ps1 functions to avoid namespace conflicts" -ForegroundColor Gray
 
-        # Dot-source the GENERATED script (contains repo-specific constants)
-        Write-Host "Loading generated script with repository constants..." -ForegroundColor Cyan
+        # Create the second workspace from the GENERATED script in a child PowerShell; its constants carry owner/repo/host
         . $GeneratedScript
-
-        # Load the generated script content into $queScript variable
-        # This is needed in case New-QueWorkspace needs to call New-QueRepoScript
         $script:queScript = Get-Content -Path $GeneratedScript -Raw -Encoding UTF8
-
-        # The generated script has $GitHubOwner and $GitHubRepo already set
-        # We need to call New-QueWorkspace to create the second workspace
-        Write-Host "Creating second workspace for $GitHubOwner/$GitHubRepo..." -ForegroundColor Cyan
-
-        # Create user info object
-        $TestUser = Test-GitHubPAT -PlainPAT $GitHubToken
-        if (-not $TestUser) {
-            Write-TestFailure "Failed to validate GitHub token for second workspace"
+        $GenConstants = Get-QueGeneratedConstants -ScriptPath $GeneratedScript
+        Write-Host "Creating second workspace for $($GenConstants.Owner)/$($GenConstants.Repo) on $($GenConstants.ForgeHost)..." -ForegroundColor Cyan
+        if ($GenConstants.ForgeHost -ne $script:TestForgeHost) {
+            Write-TestFailure "Generated script carries forge host '$($GenConstants.ForgeHost)', expected '$($script:TestForgeHost)'"
         }
-
-        # Call New-QueWorkspace function from the generated script
-        # This will clone the existing repo (since it already exists on GitHub)
-        New-QueWorkspace -GitHubOwner $GitHubOwner `
-                         -GitHubRepo $GitHubRepo `
-                         -PlainPAT $GitHubToken `
-                         -UserInfo $TestUser
-
+        Write-TestSuccess "Generated script carries forge host: $($GenConstants.ForgeHost)"
+        Invoke-QueWorkspaceCreation -ScriptPath $GeneratedScript -Owner $GenConstants.Owner -Repo $GenConstants.Repo -Token $Token -ForgeHost $GenConstants.ForgeHost -WorkingDirectory $Workspace2Path
         Pop-Location
 
         # Step 4.3: Validate second workspace
@@ -1327,8 +1661,8 @@ try {
                         }
 
                         # Verify required folders exist (catches missing CLI args/regressions)
-                        $ExpectedLfsId = "$($script:TestResults.GitHubRepoName)-lfs"
-                        $ExpectedDepotId = "$($script:TestResults.GitHubRepoName)-depot"
+                        $ExpectedLfsId = "$($script:TestResults.ForgeRepoName)-lfs"
+                        $ExpectedDepotId = "$($script:TestResults.ForgeRepoName)-depot"
                         $FolderList = & $SyncThingExe cli --home="$SyncThingHome" --gui-address="$GuiAddress" --gui-apikey="$ApiKey" config folders list 2>&1
                         if (-not $FolderList) {
                             Write-TestFailure "SyncThing folder list is empty; expected $ExpectedLfsId and $ExpectedDepotId"
@@ -1683,8 +2017,8 @@ try {
 
         # Remove any previously loaded functions to avoid conflicts
         $FunctionsToRemove = @(
-            'Find-QueWorkspace', 'Get-AvailableSyncThingPort', 'Get-SecureGitHubPAT',
-            'Set-SecureGitHubPAT', 'Store-GitCredentials', 'Test-GitHubPAT',
+            'Find-QueWorkspace', 'Get-AvailableSyncThingPort', 'Get-SecureForgeToken',
+            'Set-SecureForgeToken', 'Store-GitCredentials', 'Test-ForgeToken',
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
             'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable',
@@ -1692,8 +2026,10 @@ try {
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
             'Ensure-QueCloneOnWorkBranch',
+            'Initialize-QueForgeConfig', 'Get-QueCloneUrl', 'Import-QueWorkspaceForge', 'Expand-QueReadme', 'Write-QueTokenError',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain', 'Invoke-QueGit',
-            'Get-QueCurrentBranch', 'Get-QueCloneNameFromPath', 'Invoke-QueMerge',
+            'Get-QueCurrentBranch', 'Resolve-QueWorkBranchInput', 'Get-QueRemoteWorkBranchNames',
+            'Get-QueCloneNameFromPath', 'Invoke-QueMerge',
             'Invoke-QuePushWithRetry', 'Invoke-QueStashAll', 'Invoke-QueSaveCommand',
             'Invoke-QueLoadCommand', 'Invoke-QueImportCommand', 'Invoke-QueUpdateCommand',
             'Invoke-QueRenameCommand', 'Invoke-QueResetCommand', 'Invoke-QuePublishCommand',
@@ -1714,14 +2050,14 @@ try {
         # Load the generated script content into $queScript variable
         $script:queScript = Get-Content -Path $GeneratedScript -Raw -Encoding UTF8
 
-        # Validate GitHub token
-        $TestUser = Test-GitHubPAT -PlainPAT $GitHubToken
+        # Validate forge token
+        $TestUser = Test-ForgeToken -Token $Token
         if (-not $TestUser) {
-            Write-TestFailure "Failed to validate GitHub token for clone creation"
+            Write-TestFailure "Failed to validate forge token for clone creation"
         }
 
         # NOTE: Direct Invoke-QueCloneCommand call is a deliberate "last resort"
-        # here — the real `que clone` user path unconditionally launches the new
+        # here -- the real `que clone` user path unconditionally launches the new
         # clone's .lnk shortcut in a detached window, which would leak a
         # powershell process and race with subsequent test assertions. -SkipLaunch
         # is not exposed through the hosted `que` function since real users
@@ -1785,9 +2121,9 @@ try {
             Write-Host "  Clone $($clone.Name) remote: $RemoteUrl" -ForegroundColor Gray
 
             # Verify it's pointing to the correct repository
-            if ($RemoteUrl -notmatch $script:TestResults.GitHubRepoName) {
+            if ($RemoteUrl -notmatch $script:TestResults.ForgeRepoName) {
                 Pop-Location
-                Write-TestFailure "Clone has incorrect remote URL: $RemoteUrl (expected: $($script:TestResults.GitHubRepoName))"
+                Write-TestFailure "Clone has incorrect remote URL: $RemoteUrl (expected: $($script:TestResults.ForgeRepoName))"
             }
 
             Pop-Location
@@ -1872,6 +2208,54 @@ try {
         Write-TestSuccess "Saved imported changes via 'que save' on branch: $PostImportBranch"
         Pop-Location
 
+        # Step 9.4: Validate tab completion through the real shortcut session
+        Write-Host "`nStep 9.4: Validating que tab completion" -ForegroundColor Cyan
+
+        $PrimaryPrefixLength = [Math]::Min(2, $PrimaryCloneName.Length)
+        $PrimaryPrefix = $PrimaryCloneName.Substring(0, $PrimaryPrefixLength)
+
+        $LoadSubcommandCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que lo"
+        if ($LoadSubcommandCompletions -notcontains "load") {
+            Write-TestFailure "Tab completion for 'que lo' did not include 'load'. Results: $($LoadSubcommandCompletions -join ', ')"
+        }
+        Write-TestSuccess "Subcommand completion includes 'load'"
+
+        $ImportSubcommandCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que imp"
+        if ($ImportSubcommandCompletions -notcontains "import") {
+            Write-TestFailure "Tab completion for 'que imp' did not include 'import'. Results: $($ImportSubcommandCompletions -join ', ')"
+        }
+        Write-TestSuccess "Subcommand completion includes 'import'"
+
+        $LoadBranchCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que load $PrimaryPrefix"
+        if ($LoadBranchCompletions -notcontains $PrimaryCloneName) {
+            Write-TestFailure "Tab completion for 'que load $PrimaryPrefix' did not include '$PrimaryCloneName'. Results: $($LoadBranchCompletions -join ', ')"
+        }
+        if ($LoadBranchCompletions | Where-Object { $_ -like 'origin/que/*' -or $_ -like 'que/*' }) {
+            Write-TestFailure "Bare load completion returned prefixed branch names. Results: $($LoadBranchCompletions -join ', ')"
+        }
+        Write-TestSuccess "Load completion returns normalized bare branch names"
+
+        $ImportBranchCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que import $PrimaryPrefix"
+        if ($ImportBranchCompletions -notcontains $PrimaryCloneName) {
+            Write-TestFailure "Tab completion for 'que import $PrimaryPrefix' did not include '$PrimaryCloneName'. Results: $($ImportBranchCompletions -join ', ')"
+        }
+        if ($ImportBranchCompletions | Where-Object { $_ -like 'origin/que/*' -or $_ -like 'que/*' }) {
+            Write-TestFailure "Bare import completion returned prefixed branch names. Results: $($ImportBranchCompletions -join ', ')"
+        }
+        Write-TestSuccess "Import completion returns normalized bare branch names"
+
+        $FullLocalPrefixCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que load que/$PrimaryPrefix"
+        if ($FullLocalPrefixCompletions -notcontains "que/$PrimaryCloneName") {
+            Write-TestFailure "Tab completion for 'que load que/$PrimaryPrefix' did not include 'que/$PrimaryCloneName'. Results: $($FullLocalPrefixCompletions -join ', ')"
+        }
+        Write-TestSuccess "Load completion preserves a typed 'que/' prefix"
+
+        $FullRemotePrefixCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que load origin/que/$PrimaryPrefix"
+        if ($FullRemotePrefixCompletions -notcontains "origin/que/$PrimaryCloneName") {
+            Write-TestFailure "Tab completion for 'que load origin/que/$PrimaryPrefix' did not include 'origin/que/$PrimaryCloneName'. Results: $($FullRemotePrefixCompletions -join ', ')"
+        }
+        Write-TestSuccess "Load completion preserves a typed 'origin/que/' prefix"
+
         Write-TestSuccess "Multiple clones test completed successfully"
     }
 }
@@ -1906,10 +2290,10 @@ function Show-TestSummary {
     }
 
     Write-Host ""
-    Write-Host "GitHub Repository:" -ForegroundColor Cyan
-    Write-Host "  - Name: $($script:TestResults.GitHubRepoName)"
-    Write-Host "  - Owner: $($script:TestResults.GitHubUser)"
-    Write-Host "  - URL: https://github.com/$($script:TestResults.GitHubUser)/$($script:TestResults.GitHubRepoName)"
+    Write-Host "Forge repository:" -ForegroundColor Cyan
+    Write-Host "  - Name: $($script:TestResults.ForgeRepoName)"
+    Write-Host "  - Owner: $($script:TestResults.ForgeUser)"
+    Write-Host "  - URL: $script:TestWebBase/$($script:TestResults.ForgeUser)/$($script:TestResults.ForgeRepoName)"
 
     if ($script:TestResults.Workspace1Path) {
         Write-Host ""
@@ -1950,120 +2334,6 @@ function Show-TestSummary {
 
 #region Phase 11: Cleanup and User Prompts
 
-function Invoke-Cleanup {
-    Write-Host "`n============================================" -ForegroundColor Yellow
-    Write-Host "CLEANUP" -ForegroundColor Yellow
-    Write-Host "============================================`n" -ForegroundColor Yellow
-
-    # Stop SyncThing processes started by this test
-    $syncProcesses = Get-Process -Name "syncthing" -ErrorAction SilentlyContinue
-    if ($syncProcesses) {
-        $instanceCount = Get-SyncThingProcessCount
-        $testSyncPids = $script:TestResults.SyncThingPIDs
-        Write-Host "Found $instanceCount SyncThing instance(s) running ($($syncProcesses.Count) processes total)" -ForegroundColor Yellow
-        if (-not $testSyncPids -or $testSyncPids.Count -eq 0) {
-            Write-Host "No SyncThing processes associated with this test were detected." -ForegroundColor Gray
-        }
-        elseif (-not $KeepArtifacts) {
-            if ($script:NonInteractive) {
-                Write-Host "Non-interactive mode: stopping SyncThing processes without prompting." -ForegroundColor Gray
-                $stopSync = 'y'
-            }
-            else {
-                $stopSync = Read-Host "Stop SyncThing processes started by this test? (y/N)"
-            }
-            if ($stopSync -eq 'y' -or $stopSync -eq 'Y') {
-                foreach ($procId in $testSyncPids) {
-                    $proc = $syncProcesses | Where-Object { $_.Id -eq $procId } | Select-Object -First 1
-                    if ($proc -and $PSCmdlet.ShouldProcess("SyncThing (PID: $($proc.Id))", "stop process")) {
-                        Stop-Process -Id $proc.Id -Force
-                        Write-Host "Stopped SyncThing process: $($proc.Id)" -ForegroundColor Green
-                    }
-                }
-
-                if (-not (Wait-ForProcessExit -ProcessIds $testSyncPids -TimeoutSeconds 15 -PollIntervalSeconds 1)) {
-                    Write-Host "WARNING: SyncThing processes may still be exiting; cleanup might fail." -ForegroundColor Yellow
-                }
-            }
-        }
-    }
-
-    # Local cleanup
-    if ($script:TestRoot -and (Test-Path $script:TestRoot)) {
-        if (-not $KeepArtifacts) {
-            Write-Host "`nTest workspace location: $($script:TestRoot.FullName)" -ForegroundColor Cyan
-            if ($script:NonInteractive) {
-                Write-Host "Non-interactive mode: deleting local workspace without prompting." -ForegroundColor Gray
-                $deleteLocal = 'y'
-            }
-            else {
-                $deleteLocal = Read-Host "Delete local test workspace? (y/N)"
-            }
-            if ($deleteLocal -eq 'y' -or $deleteLocal -eq 'Y') {
-                if ($PSCmdlet.ShouldProcess($script:TestRoot.FullName, "delete directory")) {
-                    try {
-                        Remove-Item -Path $script:TestRoot.FullName -Recurse -Force
-                        Write-Host "Deleted test workspace" -ForegroundColor Green
-                    }
-                    catch {
-                        Write-Host "Failed to delete test workspace: $_" -ForegroundColor Red
-                        Write-Host "You may need to manually delete: $($script:TestRoot.FullName)" -ForegroundColor Yellow
-                    }
-                }
-            }
-            else {
-                Write-Host "Test workspace preserved at: $($script:TestRoot.FullName)" -ForegroundColor Yellow
-            }
-        }
-        else {
-            Write-Host "Keeping test artifacts at: $($script:TestRoot.FullName)" -ForegroundColor Yellow
-        }
-    }
-
-    # GitHub cleanup
-    $repoUrl = "https://github.com/$($script:TestResults.GitHubUser)/$($script:TestResults.GitHubRepoName)"
-    $repoExists = Test-GitHubRepoExists -RepoName $script:TestResults.GitHubRepoName -Token $GitHubToken -Owner $script:TestResults.GitHubUser
-
-    if ($repoExists) {
-        if (-not $KeepArtifacts) {
-            Write-Host "`nGitHub repository: $repoUrl" -ForegroundColor Cyan
-            if ($script:NonInteractive) {
-                Write-Host "Non-interactive mode: deleting GitHub repository without prompting." -ForegroundColor Gray
-                $deleteRemote = 'y'
-            }
-            else {
-                $deleteRemote = Read-Host "Delete GitHub repository '$($script:TestResults.GitHubRepoName)'? (y/N)"
-            }
-            if ($deleteRemote -eq 'y' -or $deleteRemote -eq 'Y') {
-                if ($PSCmdlet.ShouldProcess($script:TestResults.GitHubRepoName, "delete from GitHub")) {
-                    try {
-                        $headers = @{
-                            Authorization = "token $GitHubToken"
-                            Accept = "application/vnd.github.v3+json"
-                        }
-                        $deleteUrl = "https://api.github.com/repos/$($script:TestResults.GitHubUser)/$($script:TestResults.GitHubRepoName)"
-                        Invoke-RestMethod -Method Delete -Uri $deleteUrl -Headers $headers -ErrorAction Stop
-                        Write-Host "Deleted GitHub repository: $repoUrl" -ForegroundColor Green
-                    }
-                    catch {
-                        Write-Host "Failed to delete GitHub repository: $_" -ForegroundColor Red
-                        Write-Host "You may need to manually delete: $repoUrl/settings" -ForegroundColor Yellow
-                    }
-                }
-            }
-            else {
-                Write-Host "GitHub repository preserved at: $repoUrl" -ForegroundColor Yellow
-            }
-        }
-        else {
-            Write-Host "GitHub repository preserved at: $repoUrl" -ForegroundColor Yellow
-        }
-    }
-
-    Write-Host "`n============================================" -ForegroundColor Yellow
-    Write-Host "CLEANUP COMPLETE" -ForegroundColor Yellow
-    Write-Host "============================================`n" -ForegroundColor Yellow
-}
 
 #endregion
 

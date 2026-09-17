@@ -1,6 +1,6 @@
 # QUE - Quick Unreal Engine Project Manager
 
-QUE (Quick UE) is a single-file PowerShell solution for managing Unreal Engine 5.7 projects with Git, GitLFS, and SyncThing integration.
+QUE (Quick UE) is a single-file PowerShell solution for managing Unreal Engine 5.7 projects with Git, GitLFS, and SyncThing integration. It works with GitHub and with self-hosted Forgejo/Gitea servers.
 
 This is the template repo for generating a new project. A copy of the que script in the generated repo is used to manage copies of that repo.
 
@@ -17,7 +17,7 @@ This is the template repo for generating a new project. A copy of the que script
 
 - Windows 10/11
 - PowerShell 5.1 or later
-- GitHub account with Personal Access Token (PAT)
+- An account on GitHub **or** on a Forgejo/Gitea server, with an access token (see below)
 
 ### Create a New UE 5.7 Project
 
@@ -29,7 +29,8 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 ```
 
 3. Follow the prompts to:
-   - Enter your GitHub Personal Access Token
+   - Choose the git host (press Enter for GitHub, or type your Forgejo/Gitea hostname)
+   - Enter your access token (typed hidden; it is stored encrypted in the workspace and in Windows Credential Manager)
    - Specify repository name
    - Install dependencies (Git, GitLFS, SyncThing, Visual Studio, etc.)
    - Install Unreal Engine 5.7 via Epic Games Launcher
@@ -64,13 +65,33 @@ Once your workspace is set up, launch the management terminal using the shortcut
 - **syncthing** - Open the SyncThing web UI
 - **info** - Display workspace and project information
 
-## Creating GitHub Personal Access Token
+## Using a self-hosted Forgejo or Gitea server
+
+QUE never hardcodes a hostname. The host is taken from the URL the script was fetched from, or from the prompt when you create a new project with the GitHub one-liner above. Everything else (repository creation, clone URLs, credential storage, LFS) follows from that.
+
+- **New project:** run the one-liner above and answer the `Enter git host` prompt with your server's hostname, e.g. `forge.example.com`.
+- **Joining a project:** the project's README carries a one-liner that already points at the right server; just run it.
+- **Hosting `que` on your own server too (optional):** mirror this repo there and bootstrap from `https://forge.example.com/OWNER/que/raw/branch/main/que57.ps1` instead. The host is then detected and the prompt defaults to it.
+
+The generated `que57-project.ps1` and each workspace's `.que/gh-host` remember the host, so existing workspaces keep working and older workspaces default to GitHub.
+
+## Creating an access token
+
+Only the person who *creates* a project needs repository-creation rights; people joining need read/write on repositories.
+
+**GitHub**
 
 1. Go to https://github.com/settings/tokens
 2. Click "Generate new token (classic)"
 3. Select scopes: `repo` (all), `workflow`
 4. Generate and copy the token
 5. Store it securely - you'll need it for workspace setup
+
+**Forgejo / Gitea**
+
+1. Go to `https://<your host>/user/settings/applications`
+2. Generate a new token with scopes `write:repository` and `read:user`; add `write:user` if you will create repositories with QUE (the person starting a project needs it, people joining do not)
+3. If the server requires two-factor auth, sign in on the website and enroll it first - tokens only work after that
 
 ## License
 

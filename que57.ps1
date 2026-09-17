@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 
-# Enable TLS 1.2 support for GitHub API
+# Enable TLS 1.2 support for the git host API
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
 
 # ============================================================================
@@ -29,9 +29,54 @@
 # CONSTANTS - Edit these when customizing for your project
 # ----------------------------------------------------------------------------
 ###QUE_CONSTANTS_BEGIN###
-$UnrealEngineVersion = "5.7"
+$QueUnrealEngineVersion = "5.7"
+$QueForgeHost = "github.com"
 # (Other constants will be dynamically substituted)
 ###QUE_CONSTANTS_END###
+
+# ----------------------------------------------------------------------------
+# GIT HOST - github.com or any Forgejo/Gitea server. Everything host-specific
+# is derived here; nothing else in the script names a host.
+# ----------------------------------------------------------------------------
+function Initialize-QueForgeConfig {
+    param([string]$ForgeHost)
+    if ([string]::IsNullOrWhiteSpace($ForgeHost)) { $ForgeHost = 'github.com' }
+    $ForgeHost = ($ForgeHost.Trim().ToLowerInvariant() -replace '^https?://', '' -replace '/.*$', '')
+    $script:QueForgeHost = $ForgeHost
+    $script:QueIsGitHub = ($ForgeHost -eq 'github.com')
+    if ($script:QueIsGitHub) {
+        $script:QueForgeLabel = 'GitHub'
+        $script:QueApiBase = 'https://api.github.com'
+        $script:QueRawUrlFormat = 'https://raw.githubusercontent.com/{0}/{1}/main/{2}'
+        $script:QueTokenHelpUrl = 'https://github.com/settings/tokens'
+        $script:QueTokenScopesHelp = "'repo' (all)"
+    } else {
+        $script:QueForgeLabel = $ForgeHost
+        $script:QueApiBase = "https://$ForgeHost/api/v1"
+        $script:QueRawUrlFormat = "https://$ForgeHost/{0}/{1}/raw/branch/main/{2}"
+        $script:QueTokenHelpUrl = "https://$ForgeHost/user/settings/applications"
+        $script:QueTokenScopesHelp = "write:repository, read:user (plus write:user to create repositories)"
+    }
+    $script:QueCloneUrlFormat = "https://{0}@$ForgeHost/{1}/{2}.git"
+}
+Initialize-QueForgeConfig -ForgeHost $QueForgeHost
+function Get-QueCloneUrl($Login, $Owner, $Repo) { return ($script:QueCloneUrlFormat -f $Login, $Owner, $Repo) }
+function Import-QueWorkspaceForge($WorkspaceRoot) {
+    # Workspaces remember their host in .que/forge-host; older workspaces have no file and mean GitHub.
+    $HostFile = Join-Path $WorkspaceRoot ".que\forge-host"
+    $StoredHost = if (Test-Path $HostFile) { (Get-Content $HostFile | Select-Object -First 1) } else { $null }
+    Initialize-QueForgeConfig -ForgeHost $StoredHost
+}
+function Expand-QueReadme($Owner, $Repo) {
+    $RawUrl = $script:QueRawUrlFormat -f $Owner, $Repo, 'que57-project.ps1'
+    return ($EmbeddedReadme -replace '{{OWNER}}', $Owner -replace '{{REPO}}', $Repo -replace '{{HOST}}', $script:QueForgeHost -replace '{{HOST_LABEL}}', $script:QueForgeLabel -replace '{{RAW_URL}}', $RawUrl -replace '{{TOKEN_URL}}', $script:QueTokenHelpUrl -replace '{{TOKEN_SCOPES}}', $script:QueTokenScopesHelp)
+}
+function Write-QueTokenError {
+    Write-Error "Invalid $script:QueForgeLabel token. Check the token and its scopes ($script:QueTokenScopesHelp)."
+    if (-not $script:QueIsGitHub) {
+        WY "If $script:QueForgeHost requires two-factor auth, a token only works after you have signed in on the website, set your password and enrolled 2FA."
+    }
+}
 
 # ----------------------------------------------------------------------------
 # EMBEDDED FILES
@@ -100,15 +145,15 @@ This project is managed using QUE (Quick Unreal Engine).
 To set up your development environment and join this project:
 
 1. Create an empty directory for your workspace
-2. Get your GitHub Personal Access Token (see below)
+2. Get your {{HOST_LABEL}} access token (see below)
 3. Run this command in PowerShell:
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -useb -Headers @{Authorization = "token $($quePlainPAT = Read-Host 'Enter Personal Access Token';$quePlainPAT)"} -Uri ($queUrl = "https://raw.githubusercontent.com/{{OWNER}}/{{REPO}}/main/que57-project.ps1")).Content)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -useb -Headers @{Authorization = "token $($queToken = [System.Net.NetworkCredential]::new('', (Read-Host 'Enter access token' -AsSecureString)).Password; $queToken)"} -Uri ($queUrl = "{{RAW_URL}}")).Content)
 ```
 
 3. Follow the prompts to:
-   - Enter your GitHub Personal Access Token
+   - Enter your {{HOST_LABEL}} access token
    - Install dependencies (Git, GitLFS, SyncThing, Visual Studio Build Tools)
    - Install Unreal Engine 5.7 via Epic Games Launcher
    - Clone the repository
@@ -121,14 +166,13 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 
 - Windows 10/11
 - PowerShell 5.1 or later
-- GitHub Personal Access Token with `repo` and `read:org` permissions
+- An access token for {{HOST}} with scopes: {{TOKEN_SCOPES}}
 
-## Getting a GitHub PAT
+## Getting an access token
 
-1. Go to https://github.com/settings/tokens
-2. Click "Generate new token (classic)"
-3. Select scopes: `repo` (all), `read:org`
-4. Generate and copy the token
+1. Go to {{TOKEN_URL}}
+2. Create a new token with scopes: {{TOKEN_SCOPES}}
+3. Copy the token; you will paste it during setup
 
 ## Management Commands
 
@@ -148,7 +192,7 @@ workspace-root/
 +-- sync/                    # SyncThing-managed folders
 |   +-- git-lfs/lfs/         # Shared LFS storage
 |   +-- depot/               # Shared asset depot
-+-- env/                     # Environment data (PAT, SyncThing)
++-- env/                     # Environment data (token, SyncThing)
 +-- repo/                    # Repository clones
     +-- kauilani/            # Clone directory (random name)
         +-- que57-project.ps1 # Project management script
@@ -158,7 +202,7 @@ workspace-root/
 
 ## How It Works
 
-**Git LFS + SyncThing:** Large binary files are stored in Git LFS but synchronized across team members using SyncThing instead of downloading from GitHub. This provides faster syncing and reduces bandwidth costs. During initial clone, LFS pointer files are created but actual objects sync via SyncThing in the background.
+**Git LFS + SyncThing:** Large binary files are stored in Git LFS but synchronized across team members using SyncThing instead of downloading from the git server. This provides faster syncing and reduces bandwidth costs. During initial clone, LFS pointer files are created but actual objects sync via SyncThing in the background.
 
 **Persistent SyncThing Port:** SyncThing uses a consistent port (stored in `.que/syncthing/gui.port`) to ensure the same instance is detected and reused across script runs.
 
@@ -236,7 +280,8 @@ function Read-SecureFile($Path) {
 # Configure local git settings for a QUE clone
 function Set-QueGitConfig($UserInfo) {
     git config --local user.name $UserInfo.name
-    git config --local user.email ("{0}@users.noreply.github.com" -f @($UserInfo.login))
+    $Email = if ($script:QueIsGitHub) { "{0}@users.noreply.github.com" -f @($UserInfo.login) } elseif ($UserInfo.email) { $UserInfo.email } else { "{0}@{1}" -f @($UserInfo.login, $script:QueForgeHost) }
+    git config --local user.email $Email
     git config --local credential.username $UserInfo.login
     git config --local lfs.locksverify false
     git config --local push.autoSetupRemote true
@@ -249,8 +294,8 @@ function Find-QueWorkspace {
     while ($Path) {
         $QuePath = Join-Path $Path ".que"
         if (Test-Path $QuePath) {
-            $OwnerFile = Join-Path $QuePath "gh-repo-owner"
-            $RepoFile = Join-Path $QuePath "gh-repo-name"
+            $OwnerFile = Join-Path $QuePath "forge-owner"
+            $RepoFile = Join-Path $QuePath "forge-repo"
             if ((Test-Path $OwnerFile) -and (Test-Path $RepoFile)) {
                 return $Path
             }
@@ -275,54 +320,54 @@ function Get-AvailableSyncThingPort {
     throw "No available ports in range $MinPort-$MaxPort"
 }
 
-function Get-SecureGitHubPAT {
-    # Reads and decrypts GitHub Personal Access Token from env/github/pat.dat
+function Get-SecureForgeToken {
+    # Reads and decrypts the forge access token from env/forge/token.dat
     param([string]$WorkspaceRoot)
-    $PatFile = Join-Path $WorkspaceRoot "env\github\pat.dat"
-    if (-not (Test-Path $PatFile)) { return $null }
+    $TokenFile = Join-Path $WorkspaceRoot "env\forge\token.dat"
+    if (-not (Test-Path $TokenFile)) { return $null }
     try {
-        return Read-SecureFile $PatFile
+        return Read-SecureFile $TokenFile
     } catch {
-        Write-Warning "Failed to decrypt PAT: $($_.Exception.Message)"
+        Write-Warning "Failed to decrypt token: $($_.Exception.Message)"
         return $null
     }
 }
 
-function Set-SecureGitHubPAT {
-    # Encrypts and stores GitHub Personal Access Token to env/github/pat.dat
-    param([string]$PlainPAT, [string]$WorkspaceRoot)
-    $EnvDir = Join-Path $WorkspaceRoot "env\github"
+function Set-SecureForgeToken {
+    # Encrypts and stores the forge access token to env/forge/token.dat
+    param([string]$Token, [string]$WorkspaceRoot)
+    $EnvDir = Join-Path $WorkspaceRoot "env\forge"
     if (-not (Test-Path $EnvDir)) {
         New-Item -ItemType Directory -Force -Path $EnvDir | Out-Null
     }
-    $PatFile = Join-Path $WorkspaceRoot "env\github\pat.dat"
-    $SecureString = ConvertTo-SecureString $PlainPAT -AsPlainText -Force
-    $SecureString | ConvertFrom-SecureString | Set-Content $PatFile
+    $TokenFile = Join-Path $WorkspaceRoot "env\forge\token.dat"
+    $SecureString = ConvertTo-SecureString $Token -AsPlainText -Force
+    $SecureString | ConvertFrom-SecureString | Set-Content $TokenFile
 }
 
 function Store-GitCredentials {
     # Stores Git credentials in Windows Credential Manager
-    param([string]$Login, [string]$PlainPAT)
+    param([string]$Login, [string]$Token)
     $env:GCM_INTERACTIVE = "never"
     @"
 protocol=https
-host=github.com
+host=$($script:QueForgeHost)
 username=$Login
-password=$PlainPAT
+password=$Token
 "@  | git credential-manager store
 }
 
-function Test-GitHubPAT {
-    # Tests GitHub Personal Access Token validity by calling GitHub API /user
+function Test-ForgeToken {
+    # Tests an access token by calling the host API /user
     # Returns user info object or $null if invalid
     # IMPORTANT: The email field from API should NOT be used for git config
-    param([string]$PlainPAT)
+    param([string]$Token)
     try {
         $AuthHeaders = @{
-            Authorization = "token $PlainPAT"
+            Authorization = "token $Token"
             'Cache-Control' = 'no-store'
         }
-        $Response = Invoke-WebRequest -Uri 'https://api.github.com/user' -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop
+        $Response = Invoke-WebRequest -Uri "$script:QueApiBase/user" -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop
         if ($Response.StatusCode -eq 200) {
             return ($Response.Content | ConvertFrom-Json)
         }
@@ -332,12 +377,12 @@ function Test-GitHubPAT {
     return $null
 }
 
-function Test-GitHubRepoEmpty {
+function Test-ForgeRepoEmpty {
     # Returns $true if the repo exists but has no commits
-    param([string]$Owner, [string]$Repo, [string]$PlainPAT)
+    param([string]$Owner, [string]$Repo, [string]$Token, [int]$Retry = 3)
     try {
-        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
-        $CommitsUrl = "https://api.github.com/repos/$Owner/$Repo/commits?per_page=1"
+        $AuthHeaders = @{Authorization=@('token ', $Token) -join ''; 'Cache-Control'='no-store'}
+        $CommitsUrl = "$script:QueApiBase/repos/$Owner/$Repo/commits?per_page=1&limit=1"
         $Response = Invoke-WebRequest -UseBasicParsing -Uri $CommitsUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
         if ($Response.StatusCode -eq 200) {
             $Content = $Response.Content
@@ -349,7 +394,14 @@ function Test-GitHubRepoEmpty {
         if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
             $StatusCode = [int]$_.Exception.Response.StatusCode
         }
-        if ($StatusCode -eq 409) { return $true } # Git Repository is empty
+        if ($StatusCode -eq 409) {
+            # Forgejo/Gitea flip the empty flag about a second after the first push; re-check once
+            if ($Retry -gt 0 -and -not $script:QueIsGitHub) {
+                Start-Sleep -Seconds 1
+                return (Test-ForgeRepoEmpty -Owner $Owner -Repo $Repo -Token $Token -Retry ($Retry - 1))
+            }
+            return $true # Git Repository is empty
+        }
         if ($StatusCode -eq 404) { return $false }
         Write-Warning "Failed to check if repository has commits: $($_.Exception.Message)"
         return $false
@@ -357,12 +409,12 @@ function Test-GitHubRepoEmpty {
     return $false
 }
 
-function Ensure-GitHubRepoExists {
-    # Creates the GitHub repo if it does not exist
-    param([string]$Owner, [string]$Repo, [string]$PlainPAT, [object]$UserInfo)
+function Ensure-ForgeRepoExists {
+    # Creates the repo on the git host if it does not exist
+    param([string]$Owner, [string]$Repo, [string]$Token, [object]$UserInfo)
     try {
-        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
-        $RepoUrl = "https://api.github.com/repos/$Owner/$Repo"
+        $AuthHeaders = @{Authorization=@('token ', $Token) -join ''; 'Cache-Control'='no-store'}
+        $RepoUrl = "$script:QueApiBase/repos/$Owner/$Repo"
         $Response = Invoke-WebRequest -UseBasicParsing -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
         if ($Response.StatusCode -eq 200) { return $true }
     } catch {
@@ -375,25 +427,25 @@ function Ensure-GitHubRepoExists {
             return $false
         }
     }
-    WC "`nCreating GitHub repository $Owner/$Repo..."
+    WC "`nCreating $script:QueForgeLabel repository $Owner/$Repo..."
     try {
-        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
+        $AuthHeaders = @{Authorization=@('token ', $Token) -join ''; 'Cache-Control'='no-store'}
         $CreateRepoBody = @{
             name = $Repo
             private = $true
             auto_init = $false
         } | ConvertTo-Json
         $CreateUrl = if ($Owner -eq $UserInfo.login) {
-            "https://api.github.com/user/repos"
+            "$script:QueApiBase/user/repos"
         } else {
-            "https://api.github.com/orgs/$Owner/repos"
+            "$script:QueApiBase/orgs/$Owner/repos"
         }
         Invoke-WebRequest -UseBasicParsing -Uri $CreateUrl -Headers $AuthHeaders -Method Post -Body $CreateRepoBody -ContentType "application/json" | Out-Null
         WG "Repository created successfully"
         return $true
     } catch {
         Write-Error "Failed to create repository: $($_.Exception.Message)"
-        Write-Error "Verify your PAT has 'repo' permissions and you can create repos in $Owner"
+        Write-Error "Verify your token has $script:QueTokenScopesHelp and you can create repos in $Owner"
         return $false
     }
 }
@@ -490,7 +542,9 @@ function New-WindowsShortcut {
     $WshShell = New-Object -ComObject WScript.Shell
     $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
     $Shortcut.TargetPath = "powershell.exe"
-    $Shortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -Command `"& { `$QueLaunchSession = `$true; . '$TargetScript' }`""
+    # Dot-source directly in the -NoExit session. Wrapping it in & { } would scope every helper
+    # function and script variable to the block, leaving only the global 'que' stub behind.
+    $Shortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -Command `"`$QueLaunchSession = `$true; . '$TargetScript'`""
     $Shortcut.WorkingDirectory = Split-Path $TargetScript -Parent
     $Shortcut.Save()
 }
@@ -793,14 +847,14 @@ function Configure-SyncThingFolders {
         Write-Error "Syncthing executable not found"
         return
     }
-    $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
+    $ForgeRepo = Get-Content "$WorkspaceRoot\.que\forge-repo"
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     $GuiAddress = $SyncThingInfo.GuiAddress
     $ApiKey = $SyncThingInfo.ApiKey
     # Add git-lfs folder with --ignore-delete flag
     $LfsPath = Join-Path $WorkspaceRoot "sync\git-lfs"
-    $LfsFolderId = "$GitHubRepo-lfs"
-    $LfsLabel = "$GitHubRepo Git LFS"
+    $LfsFolderId = "$ForgeRepo-lfs"
+    $LfsLabel = "$ForgeRepo Git LFS"
     WC "Configuring SyncThing folder: $LfsLabel"
     Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
         "config"
@@ -813,8 +867,8 @@ function Configure-SyncThingFolders {
     )
     # Add depot folder (bidirectional)
     $DepotPath = Join-Path $WorkspaceRoot "sync\depot"
-    $DepotFolderId = "$GitHubRepo-depot"
-    $DepotLabel = "$GitHubRepo Depot"
+    $DepotFolderId = "$ForgeRepo-depot"
+    $DepotLabel = "$ForgeRepo Depot"
     WC "Configuring SyncThing folder: $DepotLabel"
     Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @(
         "config"
@@ -839,12 +893,12 @@ function Update-SyncThingDevices {
         Write-Error "Syncthing executable not found"
         return
     }
-    $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
+    $ForgeRepo = Get-Content "$WorkspaceRoot\.que\forge-repo"
     $SyncThingHome = Join-Path $WorkspaceRoot "env\syncthing-home"
     $GuiAddress = $SyncThingInfo.GuiAddress
     $ApiKey = $SyncThingInfo.ApiKey
-    $LfsFolderId = "$GitHubRepo-lfs"
-    $DepotFolderId = "$GitHubRepo-depot"
+    $LfsFolderId = "$ForgeRepo-lfs"
+    $DepotFolderId = "$ForgeRepo-depot"
     $AllKnownDeviceIds = Invoke-SyncThingCli $SyncThingExe $SyncThingHome $GuiAddress $ApiKey -Args @("config", "devices", "list") -QuietErrors
     foreach ($DeviceId in $DeviceIds) {
         if ($DeviceId -and $AllKnownDeviceIds -notcontains $DeviceId) {
@@ -914,13 +968,13 @@ function Wait-ForSyncThingLfsSync {
         return $true
     }
 
-    $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name" -ErrorAction SilentlyContinue
-    if (-not $GitHubRepo) {
+    $ForgeRepo = Get-Content "$WorkspaceRoot\.que\forge-repo" -ErrorAction SilentlyContinue
+    if (-not $ForgeRepo) {
         if (-not $Silent) { WY "Cannot determine repository name, skipping sync wait" }
         return $true
     }
 
-    $LfsFolderId = "$GitHubRepo-lfs"
+    $LfsFolderId = "$ForgeRepo-lfs"
 
     # Check if we need to wait at all
     $BaseUrl = "http://$GuiAddress/rest"
@@ -997,39 +1051,83 @@ function Write-UEGitConfigFiles {
     }
 }
 
+function Test-WingetPackageInstalled {
+    param([string]$PackageName)
+    $ListOutput = & winget list --id $PackageName --exact --accept-source-agreements 2>&1
+    return ($LASTEXITCODE -eq 0 -and (($ListOutput -join "`n") -match [regex]::Escape($PackageName)))
+}
+
+function Test-NetFx3Enabled {
+    try { return [bool](Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5" -ErrorAction SilentlyContinue).Version } catch { return $false }
+}
+
 function Install-AllDependencies {
-    # Installs all dependencies required for Unreal Engine 5.7 development
-    WC "`nInstalling prerequisites for Unreal Engine 5.7..."
-    Sync-WingetPackage -PackageName 'Git.Git'
-    Sync-WingetPackage -PackageName 'Git.GCM'
-    Sync-WingetPackage -PackageName 'EpicGames.EpicGamesLauncher'
-    Sync-WingetPackage -PackageName 'Microsoft.DotNet.Framework.DeveloperPack_4'
-    Install-NetFx3WithElevation | Out-Null
-    & (where.exe git | Select-Object -First 1) lfs install | Out-Null
-    Sync-WingetPackage -PackageName 'GitHub.GitLFS'
-    Sync-WingetPackage -PackageName 'Syncthing.Syncthing'
-    $VSBuildToolsParams = @{
-        PackageName = 'Microsoft.VisualStudio.2022.BuildTools'
-        PackageParameters = @(
-            '--quiet'
-            '--wait'
-            '--norestart'
-            '--nocache'
-            '--add Microsoft.VisualStudio.Workload.MSBuildTools'
-            '--add Microsoft.VisualStudio.Workload.VCTools;includeRecommended'
-            '--add Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools'
-            '--add Microsoft.VisualStudio.Component.Windows11SDK.22621'
-            '--add Microsoft.VisualStudio.Component.VC.140'
-            '--add Microsoft.NetCore.Component.SDK'
-            '--add Microsoft.Net.Component.4.6.2.TargetingPack'
-            '--add Microsoft.Net.ComponentGroup.4.6.2-4.7.1.DeveloperTools'
-            '--add Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64'
-            '--add Microsoft.VisualStudio.Component.Unreal.Workspace'
-            '--add Microsoft.VisualStudio.Component.VC.14.38.17.8.ATL'
-            '--remove Microsoft.VisualStudio.Component.Windows11SDK.26100'
-        ) -join ' '
+    # Installs everything Unreal development needs. Packages that require administrator rights are
+    # installed together in ONE elevated PowerShell (a single UAC prompt, none when all are present).
+    # Syncthing is a per-user portable package and is installed unelevated so it lands where
+    # Get-SyncThingExecutable looks.
+    WC "`nInstalling prerequisites for Unreal Engine $QueUnrealEngineVersion..."
+    $VSBuildToolsId = 'Microsoft.VisualStudio.2022.BuildTools'
+    $VSBuildToolsOverride = @(
+        '--quiet'
+        '--wait'
+        '--norestart'
+        '--nocache'
+        '--add Microsoft.VisualStudio.Workload.MSBuildTools'
+        '--add Microsoft.VisualStudio.Workload.VCTools;includeRecommended'
+        '--add Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools'
+        '--add Microsoft.VisualStudio.Component.Windows11SDK.22621'
+        '--add Microsoft.VisualStudio.Component.VC.140'
+        '--add Microsoft.NetCore.Component.SDK'
+        '--add Microsoft.Net.Component.4.6.2.TargetingPack'
+        '--add Microsoft.Net.ComponentGroup.4.6.2-4.7.1.DeveloperTools'
+        '--add Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64'
+        '--add Microsoft.VisualStudio.Component.Unreal.Workspace'
+        '--add Microsoft.VisualStudio.Component.VC.14.38.17.8.ATL'
+        '--remove Microsoft.VisualStudio.Component.Windows11SDK.26100'
+    ) -join ' '
+    $ElevatedIds = @('Git.Git', 'Git.GCM', 'EpicGames.EpicGamesLauncher', 'Microsoft.DotNet.Framework.DeveloperPack_4')
+    # Git for Windows bundles git-lfs; the standalone package needs elevation, so only ask for it when lfs is really missing
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $null = git lfs version 2>&1
+        if ($LASTEXITCODE -ne 0) { $ElevatedIds += 'GitHub.GitLFS' }
     }
-    Sync-WingetPackage @VSBuildToolsParams
+    $Missing = @($ElevatedIds | Where-Object { -not (Test-WingetPackageInstalled $_) })
+    $NeedVS = -not (Test-WingetPackageInstalled $VSBuildToolsId)
+    $NeedNetFx3 = -not (Test-NetFx3Enabled)
+    if ($Missing.Count -eq 0 -and -not $NeedVS -and -not $NeedNetFx3) {
+        WG "All machine-level prerequisites are already installed"
+    } elseif (Test-IsAdmin) {
+        foreach ($Id in $Missing) { Sync-WingetPackage -PackageName $Id }
+        if ($NeedVS) { Sync-WingetPackage -PackageName $VSBuildToolsId -PackageParameters $VSBuildToolsOverride }
+        if ($NeedNetFx3) { Install-NetFx3WithElevation | Out-Null }
+    } else {
+        $What = @($Missing) + @($(if ($NeedVS) { $VSBuildToolsId })) + @($(if ($NeedNetFx3) { '.NET Framework 3.5' }))
+        WY "Administrator rights are needed to install: $($What -join ', ')"
+        WY "One elevation prompt will follow; everything installs in that window."
+        $Helpers = @('WG', 'WC', 'WY', 'WW', 'WR', 'Sync-WingetPackage', 'Test-WingetPackageInstalled') | ForEach-Object {
+            "function $_ {`n$((Get-Item "function:$_").ScriptBlock)`n}"
+        }
+        $Steps = @()
+        foreach ($Id in $Missing) { $Steps += "Sync-WingetPackage -PackageName '$Id'; if (-not (Test-WingetPackageInstalled '$Id')) { `$Failed++ }" }
+        if ($NeedVS) { $Steps += "Sync-WingetPackage -PackageName '$VSBuildToolsId' -PackageParameters '$VSBuildToolsOverride'; if (-not (Test-WingetPackageInstalled '$VSBuildToolsId')) { `$Failed++ }" }
+        if ($NeedNetFx3) { $Steps += "try { WY 'Enabling .NET Framework 3.5...'; Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null; WG '.NET Framework 3.5 enabled' } catch { Write-Warning `$_.Exception.Message; `$Failed++ }" }
+        $ElevatedScript = (@('$ErrorActionPreference = "Continue"', '$Failed = 0') + $Helpers + $Steps + @(
+            'if ($Failed -gt 0) { Write-Warning "$Failed install(s) failed"; Read-Host "Press Enter to close this window" }',
+            'exit $Failed')) -join "`n"
+        $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ElevatedScript))
+        $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $Encoded -Verb RunAs -Wait -PassThru
+        if ($Process.ExitCode -ne 0) {
+            Write-Warning "$($Process.ExitCode) prerequisite install(s) failed or the elevation was declined. Continuing; run setup again to retry."
+        }
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    }
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        git lfs install 2>&1 | Out-Null
+        $null = git lfs version 2>&1
+        if ($LASTEXITCODE -ne 0) { Sync-WingetPackage -PackageName 'GitHub.GitLFS' }
+    }
+    Sync-WingetPackage -PackageName 'Syncthing.Syncthing'
     WG "`nDependencies installed successfully"
     WC "`nChecking Unreal Engine 5.7 installation..."
     $UEInstallPath = $null
@@ -1063,9 +1161,10 @@ function New-QueRepoScript {
     # Update constants section
     $ConstantsBlock = @"
 $($ThreeHashes)QUE_CONSTANTS_BEGIN$($ThreeHashes)
-`$UnrealEngineVersion = "5.7"
-`$GitHubOwner = "$Owner"
-`$GitHubRepo = "$Repo"
+`$QueUnrealEngineVersion = "5.7"
+`$QueForgeHost = "$($script:QueForgeHost)"
+`$QueForgeOwner = "$Owner"
+`$QueForgeRepo = "$Repo"
 $($ThreeHashes)QUE_CONSTANTS_END$($ThreeHashes)
 "@
     $ScriptContent = $ScriptContent -replace ('{0}QUE_CONSTANTS_BEGIN{0}[\s\S]*?{0}QUE_CONSTANTS_END{0}' -f @('###')), $ConstantsBlock
@@ -1099,33 +1198,34 @@ $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
 # Workspace Creation Functions
 
 function New-QueWorkspace {
-    # Creates a new QUE workspace with initialization modes: blank, from GitHub, from local repo
-    param([string]$GitHubOwner, [string]$GitHubRepo, [string]$PlainPAT, [object]$UserInfo)
+    # Creates a new QUE workspace with initialization modes: blank, from another git URL, from local repo
+    param([string]$ForgeOwner, [string]$ForgeRepo, [string]$Token, [object]$UserInfo)
     $WorkspaceRoot = (Get-Location).Path
-    WC "`nCreating QUE workspace for $GitHubOwner/$GitHubRepo..."
+    WC "`nCreating QUE workspace for $ForgeOwner/$ForgeRepo..."
     Write-Host "`nCreating workspace structure..."
     New-Item -ItemType Directory -Force -Path ".que" | Out-Null
     New-Item -ItemType Directory -Force -Path ".que/repo" | Out-Null
     New-Item -ItemType Directory -Force -Path "sync/git-lfs/lfs" | Out-Null
     New-Item -ItemType Directory -Force -Path "sync/depot" | Out-Null
-    New-Item -ItemType Directory -Force -Path "env/github" | Out-Null
+    New-Item -ItemType Directory -Force -Path "env/forge" | Out-Null
     New-Item -ItemType Directory -Force -Path "env/syncthing-home" | Out-Null
     New-Item -ItemType Directory -Force -Path "repo" | Out-Null
-    Set-Content -Path ".que/gh-repo-owner" -Value $GitHubOwner
-    Set-Content -Path ".que/gh-repo-name" -Value $GitHubRepo
-    Set-SecureGitHubPAT -PlainPAT $PlainPAT -WorkspaceRoot $WorkspaceRoot
-    # Check if GitHub repo exists
+    Set-Content -Path ".que/forge-owner" -Value $ForgeOwner
+    Set-Content -Path ".que/forge-repo" -Value $ForgeRepo
+    Set-Content -Path ".que/forge-host" -Value $script:QueForgeHost
+    Set-SecureForgeToken -Token $Token -WorkspaceRoot $WorkspaceRoot
+    # Check if the repo exists on the host
     $RepoExists = $false
     try {
-        $AuthHeaders = @{Authorization=@('token ', $PlainPAT) -join ''; 'Cache-Control'='no-store'}
-        $RepoUrl = "https://api.github.com/repos/$GitHubOwner/$GitHubRepo"
+        $AuthHeaders = @{Authorization=@('token ', $Token) -join ''; 'Cache-Control'='no-store'}
+        $RepoUrl = "$script:QueApiBase/repos/$ForgeOwner/$ForgeRepo"
         $Response = Invoke-WebRequest -UseBasicParsing -Uri $RepoUrl -Headers $AuthHeaders -Method Get -ErrorAction Stop
         $RepoExists = $true
-        WG "`nRepository $GitHubOwner/$GitHubRepo already exists on GitHub"
+        WG "`nRepository $ForgeOwner/$ForgeRepo already exists on $script:QueForgeLabel"
     } catch {
         if ($_.Exception.Response.StatusCode -eq 404) {
             $RepoExists = $false
-            Write-Host "`nRepository $GitHubOwner/$GitHubRepo does not exist on GitHub and will be created"
+            Write-Host "`nRepository $ForgeOwner/$ForgeRepo does not exist on $script:QueForgeLabel and will be created"
         } else {
             Write-Error "Failed to check if repository exists: $($_.Exception.Message)"
             return
@@ -1133,16 +1233,16 @@ function New-QueWorkspace {
     }
     # Determine initialization mode
     $ShouldClone = $false
-    $InitMode = 0  # 0 = blank, 1 = from other GitHub repo, 2 = from local, 3 = as part of existing GitHub repo
+    $InitMode = 0  # 0 = blank, 1 = from another git URL, 2 = from local, 3 = as part of an existing forge repo
     $RepoIsEmpty = $false
     if ($RepoExists) {
-        $RepoIsEmpty = Test-GitHubRepoEmpty -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT
+        $RepoIsEmpty = Test-ForgeRepoEmpty -Owner $ForgeOwner -Repo $ForgeRepo -Token $Token
         if ($RepoIsEmpty) {
             WY "Repository exists but is empty. Proceeding with blank project initialization."
             $ShouldClone = $false
             $InitMode = 0
         } else {
-            WG "`nRepository $GitHubOwner/$GitHubRepo already exists. Cloning it for this workspace..."
+            WG "`nRepository $ForgeOwner/$ForgeRepo already exists. Cloning it for this workspace..."
             $ShouldClone = $true
             $InitMode = 3
         }
@@ -1150,7 +1250,7 @@ function New-QueWorkspace {
         WY "`nSelect initialization method:"
         $Options = @(
             "Create a blank project",
-            "Create from existing GitHub project URL",
+            "Create from an existing git project URL",
             "Create from existing local repository"
         )
         $InitMode = Get-UserSelectionIndex -Options $Options -Default 0
@@ -1161,7 +1261,7 @@ function New-QueWorkspace {
         switch ($InitMode) {
             0 { }
             1 {
-                $SourceUrl = Read-Host "`nEnter GitHub project URL (e.g., https://github.com/owner/repo)"
+                $SourceUrl = Read-Host "`nEnter git project URL to clone from (e.g., https://github.com/owner/repo)"
                 if ([string]::IsNullOrWhiteSpace($SourceUrl)) {
                     Write-Error "URL cannot be empty"
                     return
@@ -1184,16 +1284,16 @@ function New-QueWorkspace {
     $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
     if (-not $SyncThingInfo) { throw "Failed to start SyncThing" }
     WC "`nCreating first clone..."
-    $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone $true -ShouldClone $ShouldClone -UserInfo $UserInfo -PlainPAT $PlainPAT -SyncThingInfo $SyncThingInfo
+    $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone $true -ShouldClone $ShouldClone -UserInfo $UserInfo -Token $Token -SyncThingInfo $SyncThingInfo
     # Handle special initialization modes
     if ($InitMode -eq 0) {
         WG "`nBlank project workspace created"
         WC "Next steps:"
         WW "  1. Create your Unreal Engine project in: $CloneRoot"
         WW "  2. Add and commit your files with git"
-        WW "  3. Push to GitHub when ready"
+        WW "  3. Push to $script:QueForgeLabel when ready"
     } elseif ($InitMode -eq 1 -and $CloneFromSource) {
-        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+        if (-not (Ensure-ForgeRepoExists -Owner $ForgeOwner -Repo $ForgeRepo -Token $Token -UserInfo $UserInfo)) {
             return
         }
         Push-Location $CloneRoot
@@ -1209,7 +1309,7 @@ function New-QueWorkspace {
         foreach ($File in $SourceFiles) {
             Copy-Item $File.FullName -Destination $CloneRoot -Recurse -Force
         }
-        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+        if (-not (Ensure-ForgeRepoExists -Owner $ForgeOwner -Repo $ForgeRepo -Token $Token -UserInfo $UserInfo)) {
             return
         }
         Push-Location $CloneRoot
@@ -1231,7 +1331,7 @@ function New-QueWorkspace {
         if (Test-Path variable:queScript -and $queScript) {
             WY "que57-project.ps1 missing; generating now..."
             $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
-            New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+            New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
         }
     }
     if (-not (Test-Path $ProjectScriptPath)) {
@@ -1258,18 +1358,19 @@ function New-QueClone {
         [bool]$IsFirstClone = $false,
         [bool]$ShouldClone = $false,
         [object]$UserInfo = $null,
-        [string]$PlainPAT = $null,
+        [string]$Token = $null,
         [hashtable]$SyncThingInfo = $null,
         [string]$CloneName = $null,
         [string]$SourcePath = $null
     )
-    $GitHubOwner = Get-Content "$WorkspaceRoot\.que\gh-repo-owner"
-    $GitHubRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
-    if (-not $PlainPAT) {
-        $PlainPAT = Get-SecureGitHubPAT -WorkspaceRoot $WorkspaceRoot
-        $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
+    $ForgeOwner = Get-Content "$WorkspaceRoot\.que\forge-owner"
+    $ForgeRepo = Get-Content "$WorkspaceRoot\.que\forge-repo"
+    Import-QueWorkspaceForge $WorkspaceRoot
+    if (-not $Token) {
+        $Token = Get-SecureForgeToken -WorkspaceRoot $WorkspaceRoot
+        $UserInfo = Test-ForgeToken -Token $Token
         if (-not $UserInfo) {
-            Write-Error "Failed to authenticate with stored PAT."
+            Write-Error "Failed to authenticate with the stored token."
             return
         }
     }
@@ -1285,7 +1386,7 @@ function New-QueClone {
     New-Item -ItemType Directory -Force -Path $CloneRoot | Out-Null
     $CloneMetaPath = "$WorkspaceRoot\.que\repo\$CloneName"
     New-Item -ItemType Directory -Force -Path $CloneMetaPath | Out-Null
-    Store-GitCredentials -Login $UserInfo.login -PlainPAT $PlainPAT
+    Store-GitCredentials -Login $UserInfo.login -Token $Token
     if ($SourcePath) {
         if (-not (Test-Path $SourcePath)) {
             throw "Source path not found: $SourcePath"
@@ -1296,18 +1397,18 @@ function New-QueClone {
             try {
                 git clone --no-hardlinks $SourcePath . 2>&1 | ForEach-Object { "$_" } | Out-Host
                 if ($LASTEXITCODE -ne 0) { throw "git clone from $SourcePath failed with exit code $LASTEXITCODE" }
-                git remote set-url origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
+                git remote set-url origin (Get-QueCloneUrl $UserInfo.login $ForgeOwner $ForgeRepo) 2>&1 | ForEach-Object { "$_" } | Out-Host
                 Set-QueGitConfig $UserInfo
             } finally { Pop-Location }
         }
         WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
     } elseif ($ShouldClone) {
-        WC "Cloning $GitHubOwner/$GitHubRepo..."
+        WC "Cloning $ForgeOwner/$ForgeRepo..."
         Invoke-WithLfsSkip {
             Push-Location $CloneRoot
             try {
-                git clone "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" . 2>&1 | ForEach-Object { "$_" } | Out-Host
+                git clone (Get-QueCloneUrl $UserInfo.login $ForgeOwner $ForgeRepo) . 2>&1 | ForEach-Object { "$_" } | Out-Host
                 if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
                 Set-QueGitConfig $UserInfo
             } finally { Pop-Location }
@@ -1323,13 +1424,13 @@ function New-QueClone {
         if (-not $RepoHasCommits) {
             WY "Repository is empty. Initializing default QUE files..."
             Write-GitConfigFiles -CloneRoot $CloneRoot
-            $ReadmeContent = $EmbeddedReadme -replace '{{OWNER}}', $GitHubOwner -replace '{{REPO}}', $GitHubRepo
+            $ReadmeContent = Expand-QueReadme $ForgeOwner $ForgeRepo
             Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
             if (-not (Test-Path $ProjectScriptPath)) {
                 WC "Generating que57-project.ps1..."
                 $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
                 if (Test-Path variable:queScript -and $queScript) {
-                    New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+                    New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
                 } else {
                     Write-Warning "Cannot generate que57-project.ps1 (bootstrap script not available)."
                 }
@@ -1351,13 +1452,13 @@ function New-QueClone {
                 throw "git push failed"
             }
             Pop-Location
-            WG "`nRepository initialized and pushed to GitHub!"
+            WG "`nRepository initialized and pushed to $script:QueForgeLabel!"
             WY "After creating the .uproject file, the UE git config files will be auto-generated."
         } elseif (-not (Test-Path $ProjectScriptPath)) {
             if (Test-Path variable:queScript -and $queScript) {
                 WY "que57-project.ps1 missing; generating from bootstrap script..."
                 $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
-                New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
+                New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
                 WY "Please commit and push que57-project.ps1 to share with your team."
             } else {
                 Write-Warning "que57-project.ps1 missing and cannot be generated (bootstrap script not available)."
@@ -1372,15 +1473,15 @@ function New-QueClone {
             throw "git init failed"
         }
         Set-QueGitConfig $UserInfo
-        git remote add origin "https://$($UserInfo.login)@github.com/$GitHubOwner/$GitHubRepo.git" 2>&1 | ForEach-Object { "$_" } | Out-Host
+        git remote add origin (Get-QueCloneUrl $UserInfo.login $ForgeOwner $ForgeRepo) 2>&1 | ForEach-Object { "$_" } | Out-Host
         Pop-Location
         Write-GitConfigFiles -CloneRoot $CloneRoot
-        $ReadmeContent = $EmbeddedReadme -replace '{{OWNER}}', $GitHubOwner -replace '{{REPO}}', $GitHubRepo
+        $ReadmeContent = Expand-QueReadme $ForgeOwner $ForgeRepo
         Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
         WC "Generating que57-project.ps1..."
         $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
-        New-QueRepoScript -CloneRoot $CloneRoot -Owner $GitHubOwner -Repo $GitHubRepo -SyncThingDeviceId $DeviceId
-        if (-not (Ensure-GitHubRepoExists -Owner $GitHubOwner -Repo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo)) {
+        New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
+        if (-not (Ensure-ForgeRepoExists -Owner $ForgeOwner -Repo $ForgeRepo -Token $Token -UserInfo $UserInfo)) {
             return
         }
         Push-Location $CloneRoot
@@ -1400,7 +1501,7 @@ function New-QueClone {
             throw "git push failed"
         }
         Pop-Location
-        WG "`nRepository initialized and pushed to GitHub!"
+        WG "`nRepository initialized and pushed to $script:QueForgeLabel!"
         WY "After creating the .uproject file, the UE git config files will be auto-generated."
     }
     Push-Location $CloneRoot
@@ -1417,38 +1518,61 @@ function New-QueClone {
     return $CloneRoot
 }
 
+function Invoke-QueGit {
+    param([string]$WorkingDir, [string[]]$GitArgs, [switch]$AllowFailure)
+    if (-not (Test-Path $WorkingDir)) {
+        throw "Working directory not found: $WorkingDir"
+    }
+    $FilteredArgs = @($GitArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($FilteredArgs.Count -eq 0) {
+        $CallStack = Get-PSCallStack | ForEach-Object { "  at $($_.Command) in $($_.ScriptName):$($_.ScriptLineNumber)" }
+        throw "No git command specified (GitArgs was empty or contained only null/whitespace values)`nOriginal GitArgs count: $($GitArgs.Count), GitArgs: [$($GitArgs -join ', ')]`nCall stack:`n$($CallStack -join "`n")"
+    }
+    Push-Location $WorkingDir
+    try {
+        $Output = & git @FilteredArgs 2>&1
+        $ExitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if (-not $AllowFailure -and $ExitCode -ne 0) {
+        throw "git $($FilteredArgs -join ' ') failed with exit code $ExitCode`n$($Output -join "`n")"
+    }
+    return [pscustomobject]@{
+        ExitCode = $ExitCode
+        Output = @($Output)
+        Command = $FilteredArgs -join ' '
+    }
+}
+
 # Ensures a clone stays on its own work branch (que/<clone>) when safe to do so.
 function Ensure-QueCloneOnWorkBranch {
     param([string]$CloneRoot, [string]$CloneName, [switch]$SkipIfDirty = $true)
     if (-not $CloneRoot -or -not $CloneName) { return }
     $WorkBranch = "que/$CloneName"
-    Push-Location $CloneRoot
-    try {
-        # Capture exit code before piping to avoid PowerShell quirk where pipe corrupts $LASTEXITCODE
-        $BranchOutput = git rev-parse --abbrev-ref HEAD 2>$null
-        $RevParseExit = $LASTEXITCODE
-        $CurrentBranch = $BranchOutput | Select-Object -First 1
-        if ($RevParseExit -ne 0 -or -not $CurrentBranch) { return }
-        if ($CurrentBranch -eq $WorkBranch) { return }
-        if ($SkipIfDirty) {
-            $Status = git status --porcelain 2>$null
-            if ($LASTEXITCODE -eq 0 -and $Status) { return }
+    $CurrentBranchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
+    $CurrentBranch = $CurrentBranchResult.Output | Select-Object -First 1
+    if ($CurrentBranchResult.ExitCode -ne 0 -or -not $CurrentBranch) { return }
+    if ($CurrentBranch -eq $WorkBranch) { return }
+
+    if ($SkipIfDirty) {
+        $Status = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("status", "--porcelain") -AllowFailure
+        if ($Status.ExitCode -eq 0 -and ($Status.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+            return
         }
-        $null = git show-ref --verify "refs/heads/$WorkBranch" 2>$null
-        $BranchExists = $LASTEXITCODE -eq 0
-        if ($BranchExists) {
-            git checkout $WorkBranch 2>&1 | Out-Null
-        } else {
-            git checkout -b $WorkBranch 2>&1 | Out-Null
-        }
-        $FinalOutput = git rev-parse --abbrev-ref HEAD 2>$null
-        $FinalExit = $LASTEXITCODE
-        $FinalBranch = $FinalOutput | Select-Object -First 1
-        if ($FinalExit -ne 0 -or $FinalBranch -ne $WorkBranch) {
-            Write-Warning "Failed to switch clone to work branch $WorkBranch"
-        }
-    } finally {
-        Pop-Location
+    }
+
+    $BranchExists = (Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/heads/$WorkBranch") -AllowFailure).ExitCode -eq 0
+    if ($BranchExists) {
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("checkout", $WorkBranch) -AllowFailure | Out-Null
+    } else {
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("checkout", "-b", $WorkBranch) -AllowFailure | Out-Null
+    }
+
+    $FinalBranchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
+    $FinalBranch = $FinalBranchResult.Output | Select-Object -First 1
+    if ($FinalBranchResult.ExitCode -ne 0 -or $FinalBranch -ne $WorkBranch) {
+        Write-Warning "Failed to switch clone to work branch $WorkBranch"
     }
 }
 
@@ -1472,38 +1596,55 @@ function Get-QueCloneNameFromPath {
     return (Split-Path $CloneRoot -Leaf)
 }
 
-function Invoke-QueGit {
-    param([string]$WorkingDir, [string[]]$GitArgs, [switch]$AllowFailure)
-    if (-not (Test-Path $WorkingDir)) {
-        throw "Working directory not found: $WorkingDir"
-    }
-    # Filter out null or empty arguments
-    $FilteredArgs = @($GitArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($FilteredArgs.Count -eq 0) {
-        $CallStack = Get-PSCallStack | ForEach-Object { "  at $($_.Command) in $($_.ScriptName):$($_.ScriptLineNumber)" }
-        throw "No git command specified (GitArgs was empty or contained only null/whitespace values)`nOriginal GitArgs count: $($GitArgs.Count), GitArgs: [$($GitArgs -join ', ')]`nCall stack:`n$($CallStack -join "`n")"
-    }
-    Push-Location $WorkingDir
-    try {
-        $Output = & git @FilteredArgs 2>&1
-        $ExitCode = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
-    if (-not $AllowFailure -and $ExitCode -ne 0) {
-        throw "git $($FilteredArgs -join ' ') failed with exit code $ExitCode`n$($Output -join "`n")"
-    }
-    return [pscustomobject]@{
-        ExitCode = $ExitCode
-        Output = @($Output)
-        Command = $FilteredArgs -join ' '
-    }
-}
-
 function Get-QueCurrentBranch {
     param([string]$CloneRoot)
     $Result = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--abbrev-ref", "HEAD")
     return ($Result.Output | Select-Object -First 1)
+}
+
+function Resolve-QueWorkBranchInput {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+
+    $InputName = $Name.Trim()
+    $WorkBranch = $null
+    if ($InputName -match '^origin/(que/.+)$') {
+        $WorkBranch = $matches[1]
+    } elseif ($InputName -match '^(que/.+)$') {
+        $WorkBranch = $matches[1]
+    } else {
+        $WorkBranch = "que/$InputName"
+    }
+
+    if ($WorkBranch -notmatch '^que/(.+)$') { return $null }
+
+    return [pscustomobject]@{
+        InputName   = $InputName
+        WorkBranch  = $WorkBranch
+        LogicalName = $matches[1]
+        RemoteRef   = "origin/$WorkBranch"
+    }
+}
+
+function Get-QueRemoteWorkBranchNames {
+    param([string]$WorkingDir)
+    if (-not $WorkingDir -or -not (Test-Path $WorkingDir)) {
+        return @()
+    }
+
+    $Result = Invoke-QueGit -WorkingDir $WorkingDir -GitArgs @("branch", "-r", "--list", "origin/que/*") -AllowFailure
+    if ($Result.ExitCode -ne 0) {
+        return @()
+    }
+
+    return @(
+        $Result.Output |
+            ForEach-Object { "$_".Trim() } |
+            Where-Object { $_ -like 'origin/que/*' } |
+            ForEach-Object { $_.Substring('origin/que/'.Length) } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
 }
 
 function Invoke-QueMerge {
@@ -1578,7 +1719,12 @@ function Invoke-QueSaveCommand {
 function Invoke-QueLoadCommand {
     param([string]$WorkspaceRoot, [string]$SourceCloneRoot, [string]$Name, [switch]$SkipLaunch = $false)
     if (-not $Name) { throw "Branch name is required for 'que load'." }
-    $BranchName = "que/$Name"
+    $BranchSpec = Resolve-QueWorkBranchInput -Name $Name
+    if (-not $BranchSpec) {
+        throw "Invalid work branch name for 'que load': $Name"
+    }
+    $BranchName = $BranchSpec.WorkBranch
+    $LogicalName = $BranchSpec.LogicalName
     $ExistingCloneRoot = $null
     $RepoDir = Join-Path $WorkspaceRoot "repo"
     if (Test-Path $RepoDir) {
@@ -1617,14 +1763,14 @@ function Invoke-QueLoadCommand {
     if ($RemoteCheck.ExitCode -ne 0) {
         throw "Work branch $BranchName does not exist on origin."
     }
-    $TargetClonePath = Join-Path $WorkspaceRoot "repo\$Name"
+    $TargetClonePath = Join-Path $WorkspaceRoot "repo\$LogicalName"
     if (Test-Path $TargetClonePath) {
         $CurrentBranch = Invoke-QueGit -WorkingDir $TargetClonePath -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
         $CurrentBranchName = if ($CurrentBranch.ExitCode -eq 0) { $CurrentBranch.Output | Select-Object -First 1 } else { "(unknown)" }
         throw "Clone path already exists at $TargetClonePath (current branch: $CurrentBranchName). Please open that clone or choose a different branch name."
     }
     WC "Loading $BranchName into a new clone..."
-    $CloneRoot = Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $Name -SkipLaunch
+    $CloneRoot = Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $LogicalName -SkipLaunch
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $BranchName) | Out-Null
     $SwitchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", "-c", $BranchName, "--track", "origin/$BranchName") -AllowFailure
     if ($SwitchResult.ExitCode -ne 0) {
@@ -1645,7 +1791,11 @@ function Invoke-QueImportCommand {
     if ($CurrentBranch -eq $script:QueMainBranch) {
         $CurrentBranch = Invoke-QueSaveCommand -CloneRoot $CloneRoot
     }
-    $SourceBranch = "que/$Name"
+    $BranchSpec = Resolve-QueWorkBranchInput -Name $Name
+    if (-not $BranchSpec) {
+        throw "Invalid work branch name for 'que import': $Name"
+    }
+    $SourceBranch = $BranchSpec.WorkBranch
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $SourceBranch) | Out-Null
     $RemoteCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/remotes/origin/$SourceBranch") -AllowFailure
     if ($RemoteCheck.ExitCode -ne 0) {
@@ -1724,24 +1874,24 @@ function Invoke-QuePublishCommand {
     Invoke-QueMerge -CloneRoot $CloneRoot -Source $WorkBranch -Message ("que: publish {0}" -f $WorkBranch) | Out-Null
     Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $script:QueMainBranch | Out-Null
 
-    # Push LFS objects to GitHub for disaster recovery
-    WC "Publishing LFS files to GitHub for backup..."
+    # Push LFS objects to the git host for disaster recovery
+    WC "Publishing LFS files to $script:QueForgeLabel for backup..."
     Push-Location $CloneRoot
     try {
         # Check if there are any LFS files to push
         $LfsFiles = git lfs ls-files 2>&1
         if ($LASTEXITCODE -eq 0 -and $LfsFiles) {
-            WY "Uploading LFS objects to GitHub (this provides disaster recovery)..."
+            WY "Uploading LFS objects to $script:QueForgeLabel (this provides disaster recovery)..."
             git lfs push --all origin 2>&1 | ForEach-Object {
                 if ($_ -match "Uploading|Upload|Counting|^Git LFS:") {
                     Write-Host "  $_" -ForegroundColor Gray
                 }
             }
             if ($LASTEXITCODE -eq 0) {
-                WG "LFS objects backed up to GitHub successfully"
+                WG "LFS objects backed up to $script:QueForgeLabel successfully"
             } else {
                 WY "Warning: LFS push encountered issues (exit code: $LASTEXITCODE)"
-                WY "Pointer files were published, but some LFS objects may not be backed up to GitHub"
+                WY "Pointer files were published, but some LFS objects may not be backed up to $script:QueForgeLabel"
             }
         } else {
             Write-Host "No LFS files to back up" -ForegroundColor Gray
@@ -2114,14 +2264,17 @@ function Show-WorkspaceInfo {
     Write-Host "  Root: $CloneRoot"
     $RepoVersion = Get-Content "$WorkspaceRoot\.que\repo\$CloneName\repo-version" -ErrorAction SilentlyContinue
     Write-Host "  Version: $(if ($RepoVersion) { $RepoVersion } else { 'Not set' })"
-    WY "`nGitHub:"
-    Write-Host "  Repository: $script:GitHubOwner/$script:GitHubRepo"
-    Push-Location $CloneRoot
-    $GitUser = git config user.name
-    if ($LASTEXITCODE -eq 0) {
-        $GitEmail = git config user.email
-        $GitBranch = git rev-parse --abbrev-ref HEAD 2>$null
-        if ($LASTEXITCODE -eq 0) {
+    WY "`nGit host:"
+    Write-Host "  Host: $script:QueForgeHost"
+    Write-Host "  Repository: $script:QueForgeOwner/$script:QueForgeRepo"
+    $GitUserResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("config", "user.name") -AllowFailure
+    if ($GitUserResult.ExitCode -eq 0) {
+        $GitUser = $GitUserResult.Output | Select-Object -First 1
+        $GitEmailResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("config", "user.email") -AllowFailure
+        $GitEmail = $GitEmailResult.Output | Select-Object -First 1
+        $GitBranchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
+        if ($GitBranchResult.ExitCode -eq 0) {
+            $GitBranch = $GitBranchResult.Output | Select-Object -First 1
             Write-Host "  User: $GitUser <$GitEmail>"
             Write-Host "  Branch: $GitBranch"
         } else {
@@ -2129,12 +2282,11 @@ function Show-WorkspaceInfo {
             Write-Host "  Branch: (unable to determine)"
         }
     }
-    Pop-Location
     $UProjectPath = Find-UProjectFile -CloneRoot $CloneRoot
     if ($UProjectPath) {
         WY "`nUnreal Engine:"
         Write-Host "  Project: $UProjectPath"
-        Write-Host "  Version: $script:UnrealEngineVersion"
+        Write-Host "  Version: $script:QueUnrealEngineVersion"
     } else {
         WY "`nUnreal Engine:"
         Write-Host "  No .uproject file found"
@@ -2192,14 +2344,24 @@ function Invoke-QueMain {
     if ($IsRunFromUrl) {
         $UrlOwner = $null
         $UrlRepo = $null
+        $UrlHost = $null
+        $ScriptName = $null
         $IsBootstrapScript = $false
         if ($queUrl -match 'githubusercontent\.com/([^/]+)/([^/]+)/[^/]+/(.+)$') {
+            $UrlHost = 'github.com'
             $UrlOwner = $matches[1]
             $UrlRepo = $matches[2]
             $ScriptName = $matches[3]
-            if ($ScriptName -eq 'que57.ps1') {
-                $IsBootstrapScript = $true
-            }
+        } elseif ($queUrl -match '^https?://([^/]+)/([^/]+)/([^/]+)/raw/branch/[^/]+/(.+)$') {
+            # Forgejo / Gitea raw URL: https://HOST/OWNER/REPO/raw/branch/BRANCH/FILE
+            $UrlHost = $matches[1]
+            $UrlOwner = $matches[2]
+            $UrlRepo = $matches[3]
+            $ScriptName = $matches[4]
+        }
+        if ($UrlHost) { Initialize-QueForgeConfig -ForgeHost $UrlHost }
+        if ($ScriptName -eq 'que57.ps1') {
+            $IsBootstrapScript = $true
         }
         # Early check: If current folder is not empty and not a QUE workspace, error immediately
         $CurrentFolderIsQueWorkspace = Test-Path ".que"
@@ -2213,8 +2375,8 @@ function Invoke-QueMain {
         }
         $WorkspaceRoot = Find-QueWorkspace
         if ($WorkspaceRoot) {
-            $ExistingOwner = Get-Content "$WorkspaceRoot\.que\gh-repo-owner"
-            $ExistingRepo = Get-Content "$WorkspaceRoot\.que\gh-repo-name"
+            $ExistingOwner = Get-Content "$WorkspaceRoot\.que\forge-owner"
+            $ExistingRepo = Get-Content "$WorkspaceRoot\.que\forge-repo"
             if ($UrlOwner -and $UrlRepo -and -not $IsBootstrapScript) {
                 if ($ExistingOwner -eq $UrlOwner -and $ExistingRepo -eq $UrlRepo) {
                     WG "Found matching workspace at: $WorkspaceRoot"
@@ -2241,43 +2403,52 @@ function Invoke-QueMain {
             if ($IsBootstrapScript) {
                 ###QUE_CREATION_MODE_BEGIN###
                 WG "Setting up a new project workspace...`n"
+                $HostInput = Read-Host "Enter git host - GitHub or a Forgejo/Gitea server [$($script:QueForgeHost)]"
+                if (-not [string]::IsNullOrWhiteSpace($HostInput)) {
+                    Initialize-QueForgeConfig -ForgeHost $HostInput
+                }
+                WG "Using git host: $($script:QueForgeHost)"
                 $CurrentFolderName = Split-Path $WorkspaceRoot -Leaf
                 $DefaultRepoName = $CurrentFolderName -replace '[^a-zA-Z0-9_-]', ''
-                $GitHubRepo = Read-Host "Enter new repository name [$DefaultRepoName]"
-                if ([string]::IsNullOrWhiteSpace($GitHubRepo)) {
-                    $GitHubRepo = $DefaultRepoName
+                $ForgeRepo = Read-Host "Enter new repository name [$DefaultRepoName]"
+                if ([string]::IsNullOrWhiteSpace($ForgeRepo)) {
+                    $ForgeRepo = $DefaultRepoName
                 }
-                if ([string]::IsNullOrWhiteSpace($GitHubRepo)) {
+                if ([string]::IsNullOrWhiteSpace($ForgeRepo)) {
                     Write-Error "Repository name cannot be empty"
                     return
                 }
-                WG "Using repository name: $GitHubRepo"
-                $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
-                $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
-                $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
+                WG "Using repository name: $ForgeRepo"
+                if ($queToken) {
+                    $Token = $queToken
+                } else {
+                    $SecureToken = Read-Host "Enter $script:QueForgeLabel access token" -AsSecureString
+                    $Token = [System.Net.NetworkCredential]::new('', $SecureToken).Password
+                }
+                $UserInfo = Test-ForgeToken -Token $Token
                 if (-not $UserInfo) {
-                    Write-Error "Invalid GitHub PAT. Please check your token and try again."
+                    Write-QueTokenError
                     return
                 }
                 WG "Authenticated as: $($UserInfo.login)"
-                $GitHubOwner = $UserInfo.login
-                New-QueWorkspace -GitHubOwner $GitHubOwner -GitHubRepo $GitHubRepo -PlainPAT $PlainPAT -UserInfo $UserInfo
+                $ForgeOwner = $UserInfo.login
+                New-QueWorkspace -ForgeOwner $ForgeOwner -ForgeRepo $ForgeRepo -Token $Token -UserInfo $UserInfo
                 ###QUE_CREATION_MODE_END###
             } elseif ($UrlOwner -and $UrlRepo) {
                 WG "Joining project: $UrlOwner/$UrlRepo`n"
-                if ($quePlainPAT) {
-                    $PlainPAT = $quePlainPAT
+                if ($queToken) {
+                    $Token = $queToken
                 } else {
-                    $SecurePAT = Read-Host "Enter GitHub Personal Access Token" -AsSecureString
-                    $PlainPAT = [System.Net.NetworkCredential]::new('', $SecurePAT).Password
+                    $SecureToken = Read-Host "Enter $script:QueForgeLabel access token" -AsSecureString
+                    $Token = [System.Net.NetworkCredential]::new('', $SecureToken).Password
                 }
-                $UserInfo = Test-GitHubPAT -PlainPAT $PlainPAT
+                $UserInfo = Test-ForgeToken -Token $Token
                 if (-not $UserInfo) {
-                    Write-Error "Invalid GitHub PAT. Please check your token and try again."
+                    Write-QueTokenError
                     return
                 }
                 WG "Authenticated as: $($UserInfo.login)"
-                New-QueWorkspace -GitHubOwner $UrlOwner -GitHubRepo $UrlRepo -PlainPAT $PlainPAT -UserInfo $UserInfo
+                New-QueWorkspace -ForgeOwner $UrlOwner -ForgeRepo $UrlRepo -Token $Token -UserInfo $UserInfo
             } else {
                 Write-Error "Cannot determine repository information from URL: $queUrl"
                 return
@@ -2291,6 +2462,7 @@ function Invoke-QueMain {
                 Write-Error "Not in a QUE workspace. Run this script via iex (iwr ...) to create one."
                 return
             }
+            Import-QueWorkspaceForge $WorkspaceRoot
             WC "Ensuring SyncThing is running..."
             $SyncThingInfo = Ensure-SyncThingRunning -WorkspaceRoot $WorkspaceRoot
             $CurrentDeviceId = $SyncThingInfo.DeviceId
@@ -2358,15 +2530,55 @@ function Invoke-QueMain {
             }
 
             $QueSubcommands = @('open','build','clean','package','syncthing','info','new','clone','save','load','import','update','rename','reset','publish','help','exit')
-            Register-ArgumentCompleter -CommandName que -ScriptBlock {
-                param($commandName, $parameterName, $wordToComplete)
-                $QueSubcommands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
-                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+            $QueCompleter = {
+                param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+
+                $elements = @($commandAst.CommandElements)
+                if ($elements.Count -eq 0) { return }
+
+                $currentArgIndex = if ($wordToComplete -eq '' -and $commandAst.Extent.Text -match '\s$') {
+                    $elements.Count
+                } else {
+                    [Math]::Max(0, $elements.Count - 1)
+                }
+
+                if ($currentArgIndex -eq 1) {
+                    $QueSubcommands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+                        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+                    }
+                    return
+                }
+
+                if ($currentArgIndex -ne 2 -or $elements.Count -lt 2) { return }
+
+                $subcommand = $elements[1].Value
+                if ([string]::IsNullOrWhiteSpace($subcommand)) { return }
+                $subcommand = $subcommand.ToLowerInvariant()
+                if ($subcommand -notin @('load', 'import')) { return }
+                if (-not $global:QueCloneRoot) { return }
+
+                $branchNames = Get-QueRemoteWorkBranchNames -WorkingDir $global:QueCloneRoot
+                if (-not $branchNames -or $branchNames.Count -eq 0) { return }
+
+                $completionPrefix = ''
+                if ($wordToComplete -like 'origin/que/*') {
+                    $completionPrefix = 'origin/que/'
+                } elseif ($wordToComplete -like 'que/*') {
+                    $completionPrefix = 'que/'
+                }
+
+                foreach ($branchName in $branchNames) {
+                    $completionText = "$completionPrefix$branchName"
+                    if ($completionText -like "$wordToComplete*") {
+                        [System.Management.Automation.CompletionResult]::new($completionText, $completionText, 'ParameterValue', $completionText)
+                    }
                 }
             }.GetNewClosure()
+            Register-ArgumentCompleter -CommandName que -ParameterName Command -ScriptBlock $QueCompleter
+            Register-ArgumentCompleter -CommandName que -ParameterName Arg -ScriptBlock $QueCompleter
 
             WC "`n==============================================================="
-            WG "  QUE - $script:GitHubOwner/$script:GitHubRepo"
+            WG "  QUE - $script:QueForgeOwner/$script:QueForgeRepo"
             WY "  Clone: $CloneName"
             Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
             WC "==============================================================="
@@ -2385,5 +2597,7 @@ $IsDotSourced = $MyInvocation.InvocationName -eq '.'
 # first so we still run Mode 3 here.
 if ((-not $IsDotSourced) -or $QueLaunchSession) {
     Invoke-QueMain
+    # The bootstrap one-liner leaves the token in the session as $queToken; forget it.
+    Remove-Variable -Name queToken -Scope Global -ErrorAction SilentlyContinue
 }
 
