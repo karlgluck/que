@@ -3,7 +3,7 @@
     Automated end-to-end testing script for the Que workspace tool.
 
 .DESCRIPTION
-    Test-Que.ps1 performs comprehensive testing of que57.ps1, validating the full
+    Test-Que.ps1 performs comprehensive testing of a QUE generator script (que57.ps1, que58.ps1), validating the full
     golden path workflow including forge repository creation, workspace initialization,
     SyncThing synchronization, and Git LFS operations.
 
@@ -12,7 +12,7 @@
     - Checks forge token validity and permissions
     - Ensures test repository doesn't already exist (prevents conflicts)
     - Creates isolated test environment in temp directory
-    - Creates first QUE workspace by calling que57.ps1 functions directly
+    - Creates first QUE workspace by calling the generator's functions directly
     - Creates second workspace using generated que-<repo>.ps1 script
     - Tests Git LFS tracking with .uasset files
     - Validates LFS commit and push operations
@@ -33,7 +33,7 @@
     See PLAN.md for detailed implementation roadmap and future enhancements.
 
 .PARAMETER QueScript
-    Path to the que57.ps1 script under test. Defaults to ".\que57.ps1".
+    Path to the QUE generator script under test (que57.ps1, que58.ps1). Defaults to ".\que58.ps1".
 
 .PARAMETER TestRootPath
     Optional override for the temp folder location where test workspaces will be created.
@@ -100,7 +100,7 @@
 [CmdletBinding(SupportsShouldProcess=$true)]
 param(
     [Parameter(Mandatory=$false)]
-    [string]$QueScript = ".\que57.ps1",
+    [string]$QueScript = ".\que58.ps1",
 
     [Parameter(Mandatory=$false)]
     [string]$TestRootPath,
@@ -126,6 +126,9 @@ param(
 # Absolute path of the script under test, kept in its own name: PowerShell variable names are case-insensitive,
 # so $script:queScript (the script's *content*, needed by New-QueRepoScript) is the same variable as $QueScript.
 $script:QueScriptPath = (Resolve-Path $QueScript -ErrorAction Stop).Path
+# Name of the project script the generator under test emits (que57.ps1 -> que57-project.ps1, que58.ps1 -> que58-project.ps1)
+$script:QueGeneratorName = Split-Path $script:QueScriptPath -Leaf
+$script:ProjectScriptName = [IO.Path]::GetFileNameWithoutExtension($script:QueScriptPath) + '-project.ps1'
 
 # Script-level variables
 $script:TestRoot = $null
@@ -152,7 +155,7 @@ if ($script:NonInteractive) {
     if ($KeepArtifacts) { Write-Host "Artifacts will be kept (-KeepArtifacts)." -ForegroundColor Gray }
 }
 
-# Git host under test (github.com or a Forgejo/Gitea server); mirrors Initialize-QueForgeConfig in que57.ps1
+# Git host under test (github.com or a Forgejo/Gitea server); mirrors Initialize-QueForgeConfig in the generator
 if (-not $PSBoundParameters.ContainsKey('ForgeHost') -and -not $PSBoundParameters.ContainsKey('GitHost') -and $env:QUE_TEST_FORGE_HOST) { $ForgeHost = $env:QUE_TEST_FORGE_HOST }
 # Kept in a script-scoped variable so nothing dot-sourced later can shadow it.
 $script:TestForgeHost = ($ForgeHost.Trim().ToLowerInvariant() -replace '^https?://', '' -replace '/.*$', '')
@@ -570,7 +573,7 @@ function Assert-PlainAsciiScript {
 function Get-QueGeneratedConstants {
     <#
     .SYNOPSIS
-        Reads the ###QUE_CONSTANTS### block of a generated que57-project.ps1 without executing it.
+        Reads the ###QUE_CONSTANTS### block of a generated project script without executing it.
     #>
     param([Parameter(Mandatory=$true)][string]$ScriptPath)
     $text = Get-Content -Path $ScriptPath -Raw
@@ -663,7 +666,7 @@ function Invoke-QueViaShortcut {
         Runs a `que <subcommand>` through the same path as the real .lnk shortcut.
     .DESCRIPTION
         Spawns a powershell subprocess that mirrors the shortcut arguments
-        (dot-sources que57-project.ps1 with $QueLaunchSession = $true), asserts
+        (dot-sources the project script with $QueLaunchSession = $true), asserts
         that Mode 3 setup injected the `que` function, then invokes the
         requested subcommand and exits. Use this instead of direct Invoke-Que*
         calls so tests exercise the actual user entry path end-to-end.
@@ -672,7 +675,7 @@ function Invoke-QueViaShortcut {
         (git state, file existence) since the `que` function internally
         catches and prints errors rather than propagating them.
     .PARAMETER CloneRoot
-        The clone directory whose que57-project.ps1 to launch.
+        The clone directory whose project script to launch.
     .PARAMETER QueCommand
         The subcommand string to pass to `que` (e.g. "save", "publish lkg",
         "import foo"). Leave empty to just launch + verify setup.
@@ -682,9 +685,9 @@ function Invoke-QueViaShortcut {
         [string]$QueCommand = ""
     )
 
-    $ScriptPath = Join-Path $CloneRoot "que57-project.ps1"
+    $ScriptPath = Join-Path $CloneRoot $script:ProjectScriptName
     if (-not (Test-Path $ScriptPath)) {
-        throw "que57-project.ps1 not found at: $ScriptPath"
+        throw "$($script:ProjectScriptName) not found at: $ScriptPath"
     }
 
     $EscClone  = $CloneRoot  -replace "'", "''"
@@ -728,7 +731,7 @@ function Get-QueCompletionsViaShortcut {
     .SYNOPSIS
         Returns tab completion texts from the real shortcut-style QUE session.
     .PARAMETER CloneRoot
-        The clone directory whose que57-project.ps1 should be launched.
+        The clone directory whose project script should be launched.
     .PARAMETER InputScript
         The command line text to pass to TabExpansion2.
     .PARAMETER CursorColumn
@@ -740,9 +743,9 @@ function Get-QueCompletionsViaShortcut {
         [int]$CursorColumn = -1
     )
 
-    $ScriptPath = Join-Path $CloneRoot "que57-project.ps1"
+    $ScriptPath = Join-Path $CloneRoot $script:ProjectScriptName
     if (-not (Test-Path $ScriptPath)) {
-        throw "que57-project.ps1 not found at: $ScriptPath"
+        throw "$($script:ProjectScriptName) not found at: $ScriptPath"
     }
 
     if ($CursorColumn -lt 0) {
@@ -789,9 +792,9 @@ exit 0
 function Invoke-QueScriptWithInput {
     <#
     .SYNOPSIS
-        Invokes que57.ps1 with automated input
+        Invokes the generator with automated input
     .DESCRIPTION
-        Uses a temporary input file to automate responses to que57.ps1 prompts
+        Uses a temporary input file to automate responses to the generator's prompts
         This is the best approach since PowerShell's Start-Process doesn't support
         input redirection on Windows in the same way as Unix systems
     #>
@@ -911,17 +914,17 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
 }
 Write-TestSuccess "PowerShell version $($PSVersionTable.PSVersion) is compatible"
 
-Write-TestStep "Verifying que57.ps1 exists at: $QueScript"
+Write-TestStep "Verifying $($script:QueGeneratorName) exists at: $QueScript"
 if (-not (Test-Path $QueScript)) {
-    Write-TestFailure "que57.ps1 not found at path: $QueScript" -ExitCode 3
+    Write-TestFailure "$($script:QueGeneratorName) not found at path: $QueScript" -ExitCode 3
 }
-Write-TestSuccess "que57.ps1 found"
+Write-TestSuccess "$($script:QueGeneratorName) found"
 
 Write-TestStep "Verifying scripts are BOM-free ASCII"
 try {
     Assert-PlainAsciiScript -Path $script:QueScriptPath
     Assert-PlainAsciiScript -Path $PSCommandPath
-    Write-TestSuccess "que57.ps1 and Test-Que.ps1 are BOM-free ASCII"
+    Write-TestSuccess "$($script:QueGeneratorName) and Test-Que.ps1 are BOM-free ASCII"
 }
 catch {
     Write-TestFailure "Script encoding check failed: $_" -ExitCode 3
@@ -975,7 +978,7 @@ foreach ($path in $syncthingPaths) {
 }
 
 if (-not $syncthingFound) {
-    Write-Host "WARNING: SyncThing not found in common locations. Tests may fail if que57.ps1 cannot find it." -ForegroundColor Yellow
+    Write-Host "WARNING: SyncThing not found in common locations. Tests may fail if $($script:QueGeneratorName) cannot find it." -ForegroundColor Yellow
 }
 
 # Step 1.2: GitHub Token Acquisition
@@ -1129,12 +1132,12 @@ else {
 
 Write-TestStep "Phase 3: Creating first workspace"
 
-# Dot-source que57.ps1 to access its functions directly
-Write-Host "Loading que57.ps1 functions..." -ForegroundColor Cyan
+# Dot-source the generator to access its functions directly
+Write-Host "Loading $($script:QueGeneratorName) functions..." -ForegroundColor Cyan
 . $QueScript
 Initialize-QueForgeConfig -ForgeHost $script:TestForgeHost
 
-# Load que57.ps1 content into $queScript variable (required by New-QueRepoScript)
+# Load the generator's content into $queScript variable (required by New-QueRepoScript)
 $script:queScript = Get-Content -Path $QueScript -Raw -Encoding UTF8
 
 # Override Get-UserSelectionIndex to automate initialization method selection (0 = blank project)
@@ -1171,7 +1174,7 @@ try {
 
         Write-Host "Creating workspace at: $Workspace1Path" -ForegroundColor Cyan
 
-        # Create the workspace in a child PowerShell so que57.ps1 never runs inside this test's scope
+        # Create the workspace in a child PowerShell so the generator never runs inside this test's scope
         Invoke-QueWorkspaceCreation -ScriptPath $script:QueScriptPath -Owner $TestUser.login -Repo $script:TestResults.ForgeRepoName -Token $Token -ForgeHost $script:TestForgeHost -WorkingDirectory $Workspace1Path
 
         # Validate workspace was created
@@ -1260,7 +1263,7 @@ try {
             Write-TestFailure "Could not find first clone directory"
         }
 
-        $GeneratedScript = Join-Path $FirstClone.FullName "que57-project.ps1"
+        $GeneratedScript = Join-Path $FirstClone.FullName $script:ProjectScriptName
         if (-not (Test-Path $GeneratedScript)) {
             Write-TestFailure "Generated script not found at: $GeneratedScript"
         }
@@ -1274,14 +1277,14 @@ try {
         # Change to the new workspace directory
         Push-Location $Workspace2Path
 
-        # Remove functions from que57.ps1 to avoid conflicts (unload the namespace)
-        # Get list of functions that were defined by que57.ps1
+        # Remove functions from the generator to avoid conflicts (unload the namespace)
+        # Get list of functions that were defined by the generator
         $FunctionsToRemove = @(
             'Find-QueWorkspace', 'Get-AvailableSyncThingPort', 'Get-SecureForgeToken',
             'Set-SecureForgeToken', 'Store-GitCredentials', 'Test-ForgeToken',
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
-            'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable',
+            'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable', 'Get-UnrealEngineInstallDirectory',
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
@@ -1295,7 +1298,7 @@ try {
                 Remove-Item "Function:\$FuncName" -ErrorAction SilentlyContinue
             }
         }
-        Write-Host "Unloaded que57.ps1 functions to avoid namespace conflicts" -ForegroundColor Gray
+        Write-Host "Unloaded $($script:QueGeneratorName) functions to avoid namespace conflicts" -ForegroundColor Gray
 
         # Create the second workspace from the GENERATED script in a child PowerShell; its constants carry owner/repo/host
         . $GeneratedScript
@@ -1466,7 +1469,7 @@ try {
         $Workspace2ClonePath = $Workspace2Clone.FullName
         $Workspace2CloneName = $Workspace2Clone.Name
         $Workspace2LnkPath = Join-Path $script:TestResults.Workspace2Path "open-$Workspace2CloneName.lnk"
-        $Workspace2ScriptPath = Join-Path $Workspace2ClonePath "que57-project.ps1"
+        $Workspace2ScriptPath = Join-Path $Workspace2ClonePath $script:ProjectScriptName
 
         if (-not (Test-Path $Workspace2LnkPath)) {
             Write-TestFailure "Workspace 2 .lnk file not found at: $Workspace2LnkPath"
@@ -1494,7 +1497,7 @@ try {
         Push-Location $Workspace2ClonePath
 
         # Check git status for changes
-        $GitStatus = git status --porcelain "que57-project.ps1" 2>&1
+        $GitStatus = git status --porcelain $script:ProjectScriptName 2>&1
 
         if ([string]::IsNullOrWhiteSpace($GitStatus)) {
             Write-Host "WARNING: No changes detected in que script. Device ID may already be registered." -ForegroundColor Yellow
@@ -1505,7 +1508,7 @@ try {
         }
 
         # Check git diff to see what changed
-        $GitDiff = git diff "que57-project.ps1" 2>&1
+        $GitDiff = git diff $script:ProjectScriptName 2>&1
         if ($GitDiff) {
             Write-Host "`nChanges in que script:" -ForegroundColor Gray
             $GitDiff | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
@@ -1550,7 +1553,7 @@ try {
         Write-TestSuccess "Updated workspace 1 via 'que update'"
 
         # Verify the que script was updated
-        $Workspace1ScriptPath = Join-Path $Workspace1ClonePath "que57-project.ps1"
+        $Workspace1ScriptPath = Join-Path $Workspace1ClonePath $script:ProjectScriptName
         $ScriptContent = Get-Content $Workspace1ScriptPath -Raw
 
         if ($ScriptContent -match '\$SyncThingDevices\s*=\s*@\(') {
@@ -2004,7 +2007,7 @@ try {
             $script:TestResults.Workspace1CloneName = $Workspace1PrimaryCloneName
         }
 
-        $GeneratedScript = Join-Path $Workspace1PrimaryClonePath "que57-project.ps1"
+        $GeneratedScript = Join-Path $Workspace1PrimaryClonePath $script:ProjectScriptName
         if (-not (Test-Path $GeneratedScript)) {
             Write-TestFailure "Generated script not found at: $GeneratedScript"
         }
@@ -2021,7 +2024,7 @@ try {
             'Set-SecureForgeToken', 'Store-GitCredentials', 'Test-ForgeToken',
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
-            'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable',
+            'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable', 'Get-UnrealEngineInstallDirectory',
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',

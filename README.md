@@ -28,6 +28,8 @@ This is the template repo for generating a new project. A copy of the que script
 Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ($queScript = (iwr -useb ($queUrl = "https://raw.githubusercontent.com/karlgluck/que/main/que57.ps1")).Content)
 ```
 
+For a UE 5.8 project, use `que58.ps1` in place of `que57.ps1` in the URL. It is the same tool with the UE 5.8 toolchain (Visual Studio 2022 Build Tools with MSVC 14.44) and generates `que58-project.ps1`.
+
 3. Follow the prompts to:
    - Choose the git host (press Enter for GitHub, or type your Forgejo/Gitea hostname)
    - Enter your access token (typed hidden; it is stored encrypted in the workspace and in Windows Credential Manager)
@@ -64,6 +66,16 @@ Once your workspace is set up, launch the management terminal using the shortcut
 - **package** - Create standalone client and server builds
 - **syncthing** - Open the SyncThing web UI
 - **info** - Display workspace and project information
+
+## Regenerating the project script in an existing workspace
+
+To pick up a newer version of QUE in an existing clone, dot-source the generator and point it at the clone:
+
+```powershell
+. .\que57.ps1; Update-QueRepoScript -CloneRoot C:\path\to\workspace\repo\kauilani
+```
+
+This rewrites the clone's project script from the generator. It keeps the owner, repository and host from the workspace's `.que` folder and the SyncThing devices from the clone's current project script. It does not commit anything: review the change with `git diff`, then commit and push it.
 
 ## Using a self-hosted Forgejo or Gitea server
 

@@ -603,10 +603,10 @@ function Install-NetFx3WithElevation {
 
 function Sync-WingetPackage {
     # Installs or updates a package using winget with retry logic (3 attempts)
-    param([string]$PackageName, [string]$PackageParameters = '')
+    param([string]$PackageName, [string]$PackageParameters = '', [string]$Version = '')
     WC "Ensuring $PackageName is installed..."
     $ListOutput = & winget list --id $PackageName --exact --accept-source-agreements 2>&1
-    if ($LASTEXITCODE -eq 0 -and $ListOutput -match $PackageName) {
+    if ($LASTEXITCODE -eq 0 -and (($ListOutput -join "`n") -match [regex]::Escape($PackageName))) {
         WG "$PackageName is already installed"
         return
     }
@@ -615,6 +615,7 @@ function Sync-WingetPackage {
         WY "Installing $PackageName (attempt $Attempt of $MaxAttempts)..."
         $InstallArgs = @('install', '--id', $PackageName, '--exact', '--accept-source-agreements', '--accept-package-agreements')
         if ($Attempt -lt $MaxAttempts) { $InstallArgs += '--silent' }
+        if ($Version) { $InstallArgs += @('--version', $Version) }
         if ($PackageParameters) {
             $InstallArgs += '--override'
             $InstallArgs += $PackageParameters
@@ -1061,14 +1062,27 @@ function Test-NetFx3Enabled {
     try { return [bool](Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5" -ErrorAction SilentlyContinue).Version } catch { return $false }
 }
 
+function Get-UnrealEngineInstallDirectory {
+    # Returns the install directory of a launcher-installed engine version (e.g. "5.7"), or $null.
+    # The Epic Games Launcher records every install in %ProgramData%\Epic\UnrealEngineLauncher\LauncherInstalled.dat
+    # (the same list UnrealVersionSelector reads); it does not reliably write per-version registry keys.
+    param([string]$EngineVersion)
+    $ManifestPath = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Epic\UnrealEngineLauncher\LauncherInstalled.dat'
+    if (-not (Test-Path $ManifestPath)) { return $null }
+    try { $Manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json } catch { return $null }
+    $Entry = @($Manifest.InstallationList) | Where-Object { $_.AppName -eq "UE_$EngineVersion" -and $_.InstallLocation -and (Test-Path (Join-Path $_.InstallLocation 'Engine')) } | Select-Object -First 1
+    if ($Entry) { return $Entry.InstallLocation }
+    return $null
+}
+
 function Install-AllDependencies {
     # Installs everything Unreal development needs. Packages that require administrator rights are
     # installed together in ONE elevated PowerShell (a single UAC prompt, none when all are present).
     # Syncthing is a per-user portable package and is installed unelevated so it lands where
     # Get-SyncThingExecutable looks.
     WC "`nInstalling prerequisites for Unreal Engine $QueUnrealEngineVersion..."
-    $VSBuildToolsId = 'Microsoft.VisualStudio.2022.BuildTools'
-    $VSBuildToolsOverride = @(
+    # Engine-specific toolchain: each entry is a winget Id plus an optional pinned Version and installer Override
+    $VSOverride = @(
         '--quiet'
         '--wait'
         '--norestart'
@@ -1086,31 +1100,32 @@ function Install-AllDependencies {
         '--add Microsoft.VisualStudio.Component.VC.14.38.17.8.ATL'
         '--remove Microsoft.VisualStudio.Component.Windows11SDK.26100'
     ) -join ' '
-    $ElevatedIds = @('Git.Git', 'Git.GCM', 'EpicGames.EpicGamesLauncher', 'Microsoft.DotNet.Framework.DeveloperPack_4')
+    $ToolchainPackages = @(
+        @{ Id = 'Microsoft.DotNet.Framework.DeveloperPack_4' }
+        @{ Id = 'Microsoft.VisualStudio.2022.BuildTools'; Override = $VSOverride }
+    )
+    $ElevatedPackages = @(@('Git.Git', 'Git.GCM', 'EpicGames.EpicGamesLauncher') | ForEach-Object { @{ Id = $_ } }) + $ToolchainPackages
     # Git for Windows bundles git-lfs; the standalone package needs elevation, so only ask for it when lfs is really missing
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $null = git lfs version 2>&1
-        if ($LASTEXITCODE -ne 0) { $ElevatedIds += 'GitHub.GitLFS' }
+        if ($LASTEXITCODE -ne 0) { $ElevatedPackages += @{ Id = 'GitHub.GitLFS' } }
     }
-    $Missing = @($ElevatedIds | Where-Object { -not (Test-WingetPackageInstalled $_) })
-    $NeedVS = -not (Test-WingetPackageInstalled $VSBuildToolsId)
+    $Missing = @($ElevatedPackages | Where-Object { -not (Test-WingetPackageInstalled $_.Id) })
     $NeedNetFx3 = -not (Test-NetFx3Enabled)
-    if ($Missing.Count -eq 0 -and -not $NeedVS -and -not $NeedNetFx3) {
+    if ($Missing.Count -eq 0 -and -not $NeedNetFx3) {
         WG "All machine-level prerequisites are already installed"
     } elseif (Test-IsAdmin) {
-        foreach ($Id in $Missing) { Sync-WingetPackage -PackageName $Id }
-        if ($NeedVS) { Sync-WingetPackage -PackageName $VSBuildToolsId -PackageParameters $VSBuildToolsOverride }
+        foreach ($Pkg in $Missing) { Sync-WingetPackage -PackageName $Pkg.Id -Version "$($Pkg.Version)" -PackageParameters "$($Pkg.Override)" }
         if ($NeedNetFx3) { Install-NetFx3WithElevation | Out-Null }
     } else {
-        $What = @($Missing) + @($(if ($NeedVS) { $VSBuildToolsId })) + @($(if ($NeedNetFx3) { '.NET Framework 3.5' }))
+        $What = @($Missing | ForEach-Object { $_.Id }) + @($(if ($NeedNetFx3) { '.NET Framework 3.5' }))
         WY "Administrator rights are needed to install: $($What -join ', ')"
         WY "One elevation prompt will follow; everything installs in that window."
         $Helpers = @('WG', 'WC', 'WY', 'WW', 'WR', 'Sync-WingetPackage', 'Test-WingetPackageInstalled') | ForEach-Object {
             "function $_ {`n$((Get-Item "function:$_").ScriptBlock)`n}"
         }
         $Steps = @()
-        foreach ($Id in $Missing) { $Steps += "Sync-WingetPackage -PackageName '$Id'; if (-not (Test-WingetPackageInstalled '$Id')) { `$Failed++ }" }
-        if ($NeedVS) { $Steps += "Sync-WingetPackage -PackageName '$VSBuildToolsId' -PackageParameters '$VSBuildToolsOverride'; if (-not (Test-WingetPackageInstalled '$VSBuildToolsId')) { `$Failed++ }" }
+        foreach ($Pkg in $Missing) { $Steps += "Sync-WingetPackage -PackageName '$($Pkg.Id)' -Version '$($Pkg.Version)' -PackageParameters '$($Pkg.Override)'; if (-not (Test-WingetPackageInstalled '$($Pkg.Id)')) { `$Failed++ }" }
         if ($NeedNetFx3) { $Steps += "try { WY 'Enabling .NET Framework 3.5...'; Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null; WG '.NET Framework 3.5 enabled' } catch { Write-Warning `$_.Exception.Message; `$Failed++ }" }
         $ElevatedScript = (@('$ErrorActionPreference = "Continue"', '$Failed = 0') + $Helpers + $Steps + @(
             'if ($Failed -gt 0) { Write-Warning "$Failed install(s) failed"; Read-Host "Press Enter to close this window" }',
@@ -1129,24 +1144,20 @@ function Install-AllDependencies {
     }
     Sync-WingetPackage -PackageName 'Syncthing.Syncthing'
     WG "`nDependencies installed successfully"
-    WC "`nChecking Unreal Engine 5.7 installation..."
-    $UEInstallPath = $null
-    $UERegistryPath = "HKLM:\Software\EpicGames\Unreal Engine\5.7"
-    if (Test-Path $UERegistryPath) {
-        $UEInstallPath = (Get-ItemProperty -Path $UERegistryPath -Name "InstalledDirectory" -ErrorAction SilentlyContinue).InstalledDirectory
-    }
-    if ($UEInstallPath -and (Test-Path $UEInstallPath)) {
-        WG "Unreal Engine 5.7 is installed at: $UEInstallPath"
+    WC "`nChecking Unreal Engine $QueUnrealEngineVersion installation..."
+    $UEInstallPath = Get-UnrealEngineInstallDirectory -EngineVersion $QueUnrealEngineVersion
+    if ($UEInstallPath) {
+        WG "Unreal Engine $QueUnrealEngineVersion is installed at: $UEInstallPath"
     } else {
-        WY "Unreal Engine 5.7 is not installed."
+        WY "Unreal Engine $QueUnrealEngineVersion is not installed."
         WY "Please install it using the Epic Games Launcher"
         $LauncherPath = Get-EpicGamesLauncherExecutable
         if ($LauncherPath) {
             Write-Host "Launching Epic Games Launcher from: $LauncherPath" -ForegroundColor Gray
-            Start-Process $LauncherPath -ArgumentList "-openueversion=5.7"
+            Start-Process $LauncherPath -ArgumentList "-openueversion=$QueUnrealEngineVersion"
         } else {
             Write-Warning "Could not locate Epic Games Launcher executable"
-            WY "Please open Epic Games Launcher manually and install Unreal Engine 5.7"
+            WY "Please open Epic Games Launcher manually and install Unreal Engine $QueUnrealEngineVersion"
         }
         WY "Continuing setup (UE will be required before opening the project)..."
     }
@@ -1154,14 +1165,15 @@ function Install-AllDependencies {
 
 function New-QueRepoScript {
     # Generates project-specific que57-project.ps1 script with marker-based substitution
-    param([string]$CloneRoot, [string]$Owner, [string]$Repo, [string]$SyncThingDeviceId = "")
+    param([string]$CloneRoot, [string]$Owner, [string]$Repo, [string]$SyncThingDeviceId = "", [string[]]$SyncThingDeviceIds = @(), [string]$SourceScript = $queScript)
     $ThreeHashes = '###'
     $OutputPath = "$CloneRoot\que57-project.ps1"
-    $ScriptContent = $queScript
+    $ScriptContent = $SourceScript
+    $DeviceIds = @(@($SyncThingDeviceIds) + @($SyncThingDeviceId) | Where-Object { $_ } | Select-Object -Unique)
     # Update constants section
     $ConstantsBlock = @"
 $($ThreeHashes)QUE_CONSTANTS_BEGIN$($ThreeHashes)
-`$QueUnrealEngineVersion = "5.7"
+`$QueUnrealEngineVersion = "$QueUnrealEngineVersion"
 `$QueForgeHost = "$($script:QueForgeHost)"
 `$QueForgeOwner = "$Owner"
 `$QueForgeRepo = "$Repo"
@@ -1169,11 +1181,11 @@ $($ThreeHashes)QUE_CONSTANTS_END$($ThreeHashes)
 "@
     $ScriptContent = $ScriptContent -replace ('{0}QUE_CONSTANTS_BEGIN{0}[\s\S]*?{0}QUE_CONSTANTS_END{0}' -f @('###')), $ConstantsBlock
     # Add SyncThing devices section
-    if ($SyncThingDeviceId) {
+    if ($DeviceIds.Count -gt 0) {
         $SyncThingBlock = @"
 $($ThreeHashes)QUE_SYNCTHING_BEGIN$($ThreeHashes)
 `$SyncThingDevices = @(
-    "$SyncThingDeviceId"
+$(($DeviceIds | ForEach-Object { "    `"$_`"" }) -join ",`n")
 )
 $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
 "@
@@ -1193,6 +1205,40 @@ $($ThreeHashes)QUE_SYNCTHING_END$($ThreeHashes)
     $ScriptContent = $ScriptContent -replace ('#>{0}QUE_MANAGEMENT_MODE_END{0}' -f @($ThreeHashes)), ''
     Set-Content -Path $OutputPath -Value $ScriptContent
     WG "Generated: $OutputPath"
+}
+
+function Update-QueRepoScript {
+    # Regenerates the project script of an existing clone from this generator, keeping the project identity
+    # (from the workspace's .que folder) and the SyncThing devices listed in the clone's current project script.
+    # Usage: . .\que57.ps1; Update-QueRepoScript -CloneRoot <clone dir>. Writes the file only; review and commit it yourself.
+    param([string]$CloneRoot = (Get-Location).Path)
+    $ThreeHashes = '###'
+    $SourceScript = if ((Test-Path variable:queScript) -and $queScript) { $queScript } else { Get-Content $PSCommandPath -Raw }
+    if ($SourceScript -notmatch ('{0}QUE_CREATION_MODE_BEGIN{0}' -f @($ThreeHashes))) {
+        throw "Update-QueRepoScript must be run from the que generator script (e.g. que57.ps1), not from a generated project script."
+    }
+    $CloneRoot = (Resolve-Path $CloneRoot -ErrorAction Stop).Path
+    Push-Location $CloneRoot
+    try { $WorkspaceRoot = Find-QueWorkspace } finally { Pop-Location }
+    if (-not $WorkspaceRoot) {
+        throw "$CloneRoot is not inside a QUE workspace (no .que folder with forge-owner and forge-repo above it)."
+    }
+    Import-QueWorkspaceForge $WorkspaceRoot
+    $Owner = Get-Content "$WorkspaceRoot\.que\forge-owner" | Select-Object -First 1
+    $Repo = Get-Content "$WorkspaceRoot\.que\forge-repo" | Select-Object -First 1
+    # Carry forward every SyncThing device already recorded by the clone's project script(s)
+    $ExistingScripts = @(Get-ChildItem -Path $CloneRoot -Filter 'que*-project.ps1' -File -ErrorAction SilentlyContinue)
+    $DeviceIds = @($ExistingScripts | ForEach-Object {
+        $Block = [regex]::Match((Get-Content $_.FullName -Raw), ('{0}QUE_SYNCTHING_BEGIN{0}([\s\S]*?){0}QUE_SYNCTHING_END{0}' -f @($ThreeHashes))).Groups[1].Value
+        [regex]::Matches($Block, '"([A-Z0-9]{7}(?:-[A-Z0-9]{7}){7})"') | ForEach-Object { $_.Groups[1].Value }
+    } | Select-Object -Unique)
+    WC "Regenerating project script for $Owner/$Repo ($script:QueForgeHost) with $($DeviceIds.Count) SyncThing device(s)..."
+    New-QueRepoScript -CloneRoot $CloneRoot -Owner $Owner -Repo $Repo -SyncThingDeviceIds $DeviceIds -SourceScript $SourceScript
+    $Stale = @($ExistingScripts | Where-Object { $_.Name -ne 'que57-project.ps1' })
+    if ($Stale.Count -gt 0) {
+        WY "The clone also has $($Stale.Name -join ', '). Shortcuts and teammates still use that name until you switch them over."
+    }
+    WY "Review the change with git diff, then commit and push it to share with your team."
 }
 
 # Workspace Creation Functions
@@ -1955,13 +2001,9 @@ function Get-UnrealProjectEngineVersion {
 function Get-UnrealEngineDirectory {
     param([string]$UProjectPath)
     $EngineVersion = Get-UnrealProjectEngineVersion -UProjectPath $UProjectPath
-    $RegistryPath = "HKLM:\Software\EpicGames\Unreal Engine\$EngineVersion"
-    if (-not (Test-Path $RegistryPath)) {
+    $InstallDir = Get-UnrealEngineInstallDirectory -EngineVersion $EngineVersion
+    if (-not $InstallDir) {
         throw "Unreal Engine $EngineVersion is not installed. Install it via Epic Games Launcher."
-    }
-    $InstallDir = (Get-ItemProperty -Path $RegistryPath -Name "InstalledDirectory" -ErrorAction Stop).InstalledDirectory
-    if (-not (Test-Path $InstallDir)) {
-        throw "Unreal Engine installation directory not found: $InstallDir"
     }
     return $InstallDir
 }
@@ -1978,10 +2020,10 @@ function Get-UnrealBuildTool {
 
 function Invoke-UnrealGenerate {
     param([string]$UProjectPath)
-    $UBTPath = Get-UnrealBuildTool -UProjectPath $UProjectPath
-    $ProjectDir = Split-Path $UProjectPath -Parent
+    # Go through Build.bat so UBT runs on the engine's bundled .NET runtime rather than requiring a system-wide install
+    $BuildBatchFile = Join-Path (Get-UnrealEngineDirectory -UProjectPath $UProjectPath) "Engine\Build\BatchFiles\Build.bat"
     WC "Generating project files..."
-    & $UBTPath -Mode=GenerateProjectFiles -Project="$UProjectPath" -Silent
+    & $BuildBatchFile -ProjectFiles "-Project=`"$UProjectPath`"" -Game -Silent
     if ($LASTEXITCODE -ne 0) {
         throw "Project file generation failed with exit code $LASTEXITCODE"
     }
