@@ -13,7 +13,7 @@
 # This is a single-file tool with 3 execution modes determined at runtime:
 #   Mode 1 (dot-sourced): Exports functions only, no side effects.
 #   Mode 2 (iex from URL): Bootstrap/installer. Creates workspaces and clones.
-#     Generates que57-project.ps1 by regex-replacing marker sections in itself.
+#     Generates que-project.ps1 by regex-replacing marker sections in itself.
 #   Mode 3 (direct execution): Management session. Injects `que` function +
 #     tab completion into PS session, then returns to normal prompt.
 #
@@ -68,7 +68,7 @@ function Import-QueWorkspaceForge($WorkspaceRoot) {
     Initialize-QueForgeConfig -ForgeHost $StoredHost
 }
 function Expand-QueReadme($Owner, $Repo) {
-    $RawUrl = $script:QueRawUrlFormat -f $Owner, $Repo, 'que57-project.ps1'
+    $RawUrl = $script:QueRawUrlFormat -f $Owner, $Repo, 'que-project.ps1'
     return ($EmbeddedReadme -replace '{{OWNER}}', $Owner -replace '{{REPO}}', $Repo -replace '{{HOST}}', $script:QueForgeHost -replace '{{HOST_LABEL}}', $script:QueForgeLabel -replace '{{RAW_URL}}', $RawUrl -replace '{{TOKEN_URL}}', $script:QueTokenHelpUrl -replace '{{TOKEN_SCOPES}}', $script:QueTokenScopesHelp)
 }
 function Write-QueTokenError {
@@ -176,7 +176,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 
 ## Management Commands
 
-Once your workspace is set up, launch the management terminal using `que57-project.ps1`:
+Once your workspace is set up, launch the management terminal using `que-project.ps1`:
 
 - **open** - Generate project files, build, and launch UE editor
 - **build** - Build the editor target
@@ -195,7 +195,7 @@ workspace-root/
 +-- env/                     # Environment data (token, SyncThing)
 +-- repo/                    # Repository clones
     +-- kauilani/            # Clone directory (random name)
-        +-- que57-project.ps1 # Project management script
+        +-- que-project.ps1 # Project management script
 ```
 
 **Clone Naming:** Each clone gets a unique Hawaiian-sounding name (e.g., Kauilani, Mahalo, Wakena) to make the randomness more pleasant and easily recognized.
@@ -209,6 +209,50 @@ workspace-root/
 ## About QUE
 
 QUE is a single-file PowerShell solution for managing Unreal Engine projects with Git, GitLFS, and SyncThing integration. Learn more at https://github.com/karlgluck/que
+'@
+# Written over an older project script name (e.g. que57-project.ps1) by Update-QueRepoScript
+$QueLegacyStub = @'
+# This clone's project script is now que-project.ps1. Shortcuts, older sessions and old join
+# one-liners still use this name, so this file updates the workspace and hands over to que-project.ps1.
+if (-not $PSScriptRoot) {
+    # Run from an old join one-liner: fetch que-project.ps1 from the same place and run that instead
+    if (-not $queToken) { $queToken = $quePlainPAT }
+    Remove-Variable -Name quePlainPAT -ErrorAction SilentlyContinue
+    $queUrl = $queUrl -replace '[^/]+$', 'que-project.ps1'
+    $queScript = (Invoke-WebRequest -UseBasicParsing -Headers @{ Authorization = "token $queToken" } -Uri $queUrl -ErrorAction Stop).Content
+    Invoke-Expression $queScript
+    return
+}
+& {
+    $Workspace = $PSScriptRoot
+    while ($Workspace -and -not (Test-Path (Join-Path $Workspace '.que'))) {
+        $Parent = Split-Path $Workspace -Parent
+        $Workspace = if ($Parent -ne $Workspace) { $Parent } else { $null }
+    }
+    if (-not $Workspace) { return }
+    # Workspaces made before que 15e9702 keep their details under older names; copy them to the current ones
+    foreach ($Pair in @(@('.que\gh-repo-owner', '.que\forge-owner'), @('.que\gh-repo-name', '.que\forge-repo'), @('.que\gh-host', '.que\forge-host'), @('env\github\pat.dat', 'env\forge\token.dat'))) {
+        $From = Join-Path $Workspace $Pair[0]
+        $To = Join-Path $Workspace $Pair[1]
+        if ((Test-Path $From) -and -not (Test-Path $To)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $To -Parent) | Out-Null
+            Copy-Item $From $To
+            Write-Host "Copied $($Pair[0]) to $($Pair[1])" -ForegroundColor Yellow
+        }
+    }
+    # Point shortcuts that open this file at que-project.ps1
+    $Shell = New-Object -ComObject WScript.Shell
+    $NewScript = Join-Path $PSScriptRoot 'que-project.ps1'
+    Get-ChildItem -Path $Workspace -Filter 'open-*.lnk' -File | ForEach-Object {
+        $Link = $Shell.CreateShortcut($_.FullName)
+        if ($Link.Arguments -match [regex]::Escape($PSCommandPath)) {
+            $Link.Arguments = $Link.Arguments -replace [regex]::Escape($PSCommandPath), $NewScript.Replace('$', '$$')
+            $Link.Save()
+            Write-Host "Shortcut $($_.Name) now opens que-project.ps1" -ForegroundColor Yellow
+        }
+    }
+}
+if ($MyInvocation.InvocationName -eq '.') { . (Join-Path $PSScriptRoot 'que-project.ps1') } else { & (Join-Path $PSScriptRoot 'que-project.ps1') @args }
 '@
 ###QUE_EMBEDDED_FILES_END###
 
@@ -251,10 +295,10 @@ Plugins/*/Intermediate/
 '@
 
 # ----------------------------------------------------------------------------
-# SYNCTHING DEVICES (only in que57-project.ps1)
+# SYNCTHING DEVICES (only in que-project.ps1)
 # ----------------------------------------------------------------------------
 ###QUE_SYNCTHING_BEGIN###
-# $SyncThingDevices = @()  # Embedded in que57-project.ps1 only (array of device IDs)
+# $SyncThingDevices = @()  # Embedded in que-project.ps1 only (array of device IDs)
 ###QUE_SYNCTHING_END###
 
 # ----------------------------------------------------------------------------
@@ -1164,10 +1208,10 @@ function Install-AllDependencies {
 }
 
 function New-QueRepoScript {
-    # Generates project-specific que57-project.ps1 script with marker-based substitution
+    # Generates project-specific que-project.ps1 script with marker-based substitution
     param([string]$CloneRoot, [string]$Owner, [string]$Repo, [string]$SyncThingDeviceId = "", [string[]]$SyncThingDeviceIds = @(), [string]$SourceScript = $queScript)
     $ThreeHashes = '###'
-    $OutputPath = "$CloneRoot\que57-project.ps1"
+    $OutputPath = "$CloneRoot\que-project.ps1"
     $ScriptContent = $SourceScript
     $DeviceIds = @(@($SyncThingDeviceIds) + @($SyncThingDeviceId) | Where-Object { $_ } | Select-Object -Unique)
     # Update constants section
@@ -1234,12 +1278,14 @@ function Update-QueRepoScript {
     } | Select-Object -Unique)
     WC "Regenerating project script for $Owner/$Repo ($script:QueForgeHost) with $($DeviceIds.Count) SyncThing device(s)..."
     New-QueRepoScript -CloneRoot $CloneRoot -Owner $Owner -Repo $Repo -SyncThingDeviceIds $DeviceIds -SourceScript $SourceScript
-    $Stale = @($ExistingScripts | Where-Object { $_.Name -ne 'que57-project.ps1' })
-    if ($Stale.Count -gt 0) {
-        WY "The clone also has $($Stale.Name -join ', '). Shortcuts and teammates still use that name until you switch them over."
+    # Older names stay as stubs so existing shortcuts, sessions and join one-liners keep working
+    foreach ($Old in @($ExistingScripts | Where-Object { $_.Name -ne 'que-project.ps1' })) {
+        Set-Content -Path $Old.FullName -Value $QueLegacyStub
+        WY "Replaced $($Old.Name) with a stub that migrates the workspace and opens que-project.ps1"
     }
     WY "Review the change with git diff, then commit and push it to share with your team."
 }
+
 
 # Workspace Creation Functions
 
@@ -1372,17 +1418,17 @@ function New-QueWorkspace {
         Pop-Location
         WG "Pulled latest from repository into $CloneRoot"
     }
-    $ProjectScriptPath = Join-Path $CloneRoot "que57-project.ps1"
+    $ProjectScriptPath = Join-Path $CloneRoot "que-project.ps1"
     if (-not (Test-Path $ProjectScriptPath)) {
         if (Test-Path variable:queScript -and $queScript) {
-            WY "que57-project.ps1 missing; generating now..."
+            WY "que-project.ps1 missing; generating now..."
             $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
             New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
         }
     }
     if (-not (Test-Path $ProjectScriptPath)) {
-        Write-Error "Workspace creation incomplete: que57-project.ps1 is missing in $CloneRoot"
-        WY "Fix the repository or rerun the setup to generate que57-project.ps1 before continuing."
+        Write-Error "Workspace creation incomplete: que-project.ps1 is missing in $CloneRoot"
+        WY "Fix the repository or rerun the setup to generate que-project.ps1 before continuing."
         return
     }
     Set-Content -Path ".que/workspace-version" -Value "1"
@@ -1461,7 +1507,7 @@ function New-QueClone {
         }
         WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
-        $ProjectScriptPath = "$CloneRoot\que57-project.ps1"
+        $ProjectScriptPath = "$CloneRoot\que-project.ps1"
         $RepoHasCommits = $true
         Push-Location $CloneRoot
         git rev-parse --verify HEAD 2>$null | Out-Null
@@ -1473,12 +1519,12 @@ function New-QueClone {
             $ReadmeContent = Expand-QueReadme $ForgeOwner $ForgeRepo
             Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
             if (-not (Test-Path $ProjectScriptPath)) {
-                WC "Generating que57-project.ps1..."
+                WC "Generating que-project.ps1..."
                 $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
                 if (Test-Path variable:queScript -and $queScript) {
                     New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
                 } else {
-                    Write-Warning "Cannot generate que57-project.ps1 (bootstrap script not available)."
+                    Write-Warning "Cannot generate que-project.ps1 (bootstrap script not available)."
                 }
             }
             Push-Location $CloneRoot
@@ -1502,12 +1548,12 @@ function New-QueClone {
             WY "After creating the .uproject file, the UE git config files will be auto-generated."
         } elseif (-not (Test-Path $ProjectScriptPath)) {
             if (Test-Path variable:queScript -and $queScript) {
-                WY "que57-project.ps1 missing; generating from bootstrap script..."
+                WY "que-project.ps1 missing; generating from bootstrap script..."
                 $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
                 New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
-                WY "Please commit and push que57-project.ps1 to share with your team."
+                WY "Please commit and push que-project.ps1 to share with your team."
             } else {
-                Write-Warning "que57-project.ps1 missing and cannot be generated (bootstrap script not available)."
+                Write-Warning "que-project.ps1 missing and cannot be generated (bootstrap script not available)."
             }
         }
     } else {
@@ -1524,7 +1570,7 @@ function New-QueClone {
         Write-GitConfigFiles -CloneRoot $CloneRoot
         $ReadmeContent = Expand-QueReadme $ForgeOwner $ForgeRepo
         Set-Content -Path "$CloneRoot\README.md" -Value $ReadmeContent
-        WC "Generating que57-project.ps1..."
+        WC "Generating que-project.ps1..."
         $DeviceId = if ($SyncThingInfo) { $SyncThingInfo.DeviceId } else { "" }
         New-QueRepoScript -CloneRoot $CloneRoot -Owner $ForgeOwner -Repo $ForgeRepo -SyncThingDeviceId $DeviceId
         if (-not (Ensure-ForgeRepoExists -Owner $ForgeOwner -Repo $ForgeRepo -Token $Token -UserInfo $UserInfo)) {
@@ -1556,7 +1602,7 @@ function New-QueClone {
     git config --local lfs.storage $LfsStoragePath
     Pop-Location
     $ShortcutPath = "$WorkspaceRoot\open-$CloneName.lnk"
-    $TargetScript = "$CloneRoot\que57-project.ps1"
+    $TargetScript = "$CloneRoot\que-project.ps1"
     New-WindowsShortcut -ShortcutPath $ShortcutPath -TargetScript $TargetScript
     WG "Created shortcut: $ShortcutPath"
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"
@@ -1623,7 +1669,7 @@ function Ensure-QueCloneOnWorkBranch {
 }
 
 # ----------------------------------------------------------------------------
-# MANAGEMENT COMMANDS (commented out in que57.ps1, active in que57-project.ps1)
+# MANAGEMENT COMMANDS (commented out in que57.ps1, active in que-project.ps1)
 # ----------------------------------------------------------------------------
 <####QUE_MANAGEMENT_MODE_BEGIN###
 

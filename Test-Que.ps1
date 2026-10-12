@@ -126,9 +126,9 @@ param(
 # Absolute path of the script under test, kept in its own name: PowerShell variable names are case-insensitive,
 # so $script:queScript (the script's *content*, needed by New-QueRepoScript) is the same variable as $QueScript.
 $script:QueScriptPath = (Resolve-Path $QueScript -ErrorAction Stop).Path
-# Name of the project script the generator under test emits (que57.ps1 -> que57-project.ps1, que58.ps1 -> que58-project.ps1)
+# Name of the project script every generator emits
 $script:QueGeneratorName = Split-Path $script:QueScriptPath -Leaf
-$script:ProjectScriptName = [IO.Path]::GetFileNameWithoutExtension($script:QueScriptPath) + '-project.ps1'
+$script:ProjectScriptName = 'que-project.ps1'
 
 # Script-level variables
 $script:TestRoot = $null
