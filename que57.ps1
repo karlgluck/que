@@ -182,6 +182,7 @@ Once your workspace is set up, launch the management terminal using `que-project
 - **build** - Build the editor target
 - **clean** - Delete intermediate files for full rebuild
 - **package** - Create standalone builds
+- **deps** - Install or repair prerequisites (MSVC toolchain, Unreal Engine)
 - **info** - Display workspace information
 
 ## Project Structure
@@ -1119,13 +1120,62 @@ function Get-UnrealEngineInstallDirectory {
     return $null
 }
 
+# The MSVC this engine version builds with, as Visual Studio 2022 Build Tools components
+$QueMsvcComponents = @('Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64', 'Microsoft.VisualStudio.Component.VC.14.38.17.8.ATL')
+
+function Get-QueBuildToolsPath {
+    # Returns the install path of Visual Studio 2022 Build Tools, or $null
+    $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $VsWhere)) { return $null }
+    return (& $VsWhere -products Microsoft.VisualStudio.Product.BuildTools -version '[17.0,18.0)' -latest -property installationPath | Select-Object -First 1)
+}
+
+function Test-QueMsvcInstalled {
+    # True when Visual Studio 2022 Build Tools has every MSVC component this engine version pins
+    param([string[]]$Components)
+    $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $VsWhere)) { return $false }
+    return [bool](& $VsWhere -products Microsoft.VisualStudio.Product.BuildTools -version '[17.0,18.0)' -requires $Components -property installationPath)
+}
+
+function Repair-QueBuildTools {
+    # winget skips Build Tools when any version is installed, so a machine set up for an older engine can lack the MSVC
+    # this engine pins, or default to one Unreal bans. Updates the install to the latest VS 2022 release, then adds the
+    # components. Uses the Build Tools bootstrapper, which also updates the Visual Studio Installer. Needs admin rights.
+    param([string]$InstallPath, [string[]]$Components)
+    $Bootstrapper = Join-Path $env:TEMP 'vs_buildtools.exe'
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vs/17/release/vs_buildtools.exe' -OutFile $Bootstrapper -ErrorAction Stop
+    } catch {
+        Write-Warning "Could not download the Visual Studio Build Tools bootstrapper: $($_.Exception.Message)"
+        return $false
+    }
+    WY "Updating Visual Studio Build Tools at $InstallPath (this can take a while)..."
+    $Update = Start-Process -FilePath $Bootstrapper -ArgumentList @('update', '--installPath', "`"$InstallPath`"", '--quiet', '--wait', '--norestart') -Wait -PassThru
+    if ($Update.ExitCode -notin @(0, 3010)) {
+        Write-Warning "Visual Studio Build Tools update failed with exit code $($Update.ExitCode)"
+        return $false
+    }
+    WY "Adding $($Components -join ', ')..."
+    $ModifyArgs = @('modify', '--installPath', "`"$InstallPath`"") + @($Components | ForEach-Object { '--add'; $_ }) + @('--quiet', '--wait', '--norestart')
+    $Modify = Start-Process -FilePath $Bootstrapper -ArgumentList $ModifyArgs -Wait -PassThru
+    if ($Modify.ExitCode -notin @(0, 3010)) {
+        Write-Warning "Adding the MSVC components failed with exit code $($Modify.ExitCode)"
+        return $false
+    }
+    if (3010 -in @($Update.ExitCode, $Modify.ExitCode)) { WY "Restart Windows to finish the Visual Studio update." }
+    WG "Visual Studio Build Tools now has $($Components -join ', ')"
+    return $true
+}
+
 function Install-AllDependencies {
     # Installs everything Unreal development needs. Packages that require administrator rights are
     # installed together in ONE elevated PowerShell (a single UAC prompt, none when all are present).
     # Syncthing is a per-user portable package and is installed unelevated so it lands where
     # Get-SyncThingExecutable looks.
     WC "`nInstalling prerequisites for Unreal Engine $QueUnrealEngineVersion..."
-    # Engine-specific toolchain: each entry is a winget Id plus an optional pinned Version and installer Override
+    # Engine-specific toolchain: each package is a winget Id plus an optional pinned Version and installer Override
+    $MsvcComponents = $QueMsvcComponents
     $VSOverride = @(
         '--quiet'
         '--wait'
@@ -1139,9 +1189,8 @@ function Install-AllDependencies {
         '--add Microsoft.NetCore.Component.SDK'
         '--add Microsoft.Net.Component.4.6.2.TargetingPack'
         '--add Microsoft.Net.ComponentGroup.4.6.2-4.7.1.DeveloperTools'
-        '--add Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64'
         '--add Microsoft.VisualStudio.Component.Unreal.Workspace'
-        '--add Microsoft.VisualStudio.Component.VC.14.38.17.8.ATL'
+        $MsvcComponents | ForEach-Object { "--add $_" }
         '--remove Microsoft.VisualStudio.Component.Windows11SDK.26100'
     ) -join ' '
     $ToolchainPackages = @(
@@ -1156,26 +1205,36 @@ function Install-AllDependencies {
     }
     $Missing = @($ElevatedPackages | Where-Object { -not (Test-WingetPackageInstalled $_.Id) })
     $NeedNetFx3 = -not (Test-NetFx3Enabled)
-    if ($Missing.Count -eq 0 -and -not $NeedNetFx3) {
+    # winget skips Build Tools when any version is installed, so also check an existing install has this engine's MSVC
+    $BuildToolsPath = Get-QueBuildToolsPath
+    $NeedMsvc = [bool]$BuildToolsPath -and -not (Test-QueMsvcInstalled $MsvcComponents)
+    if ($Missing.Count -eq 0 -and -not $NeedNetFx3 -and -not $NeedMsvc) {
         WG "All machine-level prerequisites are already installed"
     } elseif (Test-IsAdmin) {
         foreach ($Pkg in $Missing) { Sync-WingetPackage -PackageName $Pkg.Id -Version "$($Pkg.Version)" -PackageParameters "$($Pkg.Override)" }
         if ($NeedNetFx3) { Install-NetFx3WithElevation | Out-Null }
+        if ($NeedMsvc) { Repair-QueBuildTools -InstallPath $BuildToolsPath -Components $MsvcComponents | Out-Null }
     } else {
-        $What = @($Missing | ForEach-Object { $_.Id }) + @($(if ($NeedNetFx3) { '.NET Framework 3.5' }))
+        $What = @($Missing | ForEach-Object { $_.Id }) + @($(if ($NeedNetFx3) { '.NET Framework 3.5' })) + @($(if ($NeedMsvc) { "MSVC for Unreal Engine $QueUnrealEngineVersion ($($MsvcComponents -join ', '))" }))
         WY "Administrator rights are needed to install: $($What -join ', ')"
         WY "One elevation prompt will follow; everything installs in that window."
-        $Helpers = @('WG', 'WC', 'WY', 'WW', 'WR', 'Sync-WingetPackage', 'Test-WingetPackageInstalled') | ForEach-Object {
+        $Helpers = @('WG', 'WC', 'WY', 'WW', 'WR', 'Sync-WingetPackage', 'Test-WingetPackageInstalled', 'Repair-QueBuildTools') | ForEach-Object {
             "function $_ {`n$((Get-Item "function:$_").ScriptBlock)`n}"
         }
         $Steps = @()
         foreach ($Pkg in $Missing) { $Steps += "Sync-WingetPackage -PackageName '$($Pkg.Id)' -Version '$($Pkg.Version)' -PackageParameters '$($Pkg.Override)'; if (-not (Test-WingetPackageInstalled '$($Pkg.Id)')) { `$Failed++ }" }
+        if ($NeedMsvc) { $Steps += "if (-not (Repair-QueBuildTools -InstallPath '$BuildToolsPath' -Components @('$($MsvcComponents -join "', '")'))) { `$Failed++ }" }
         if ($NeedNetFx3) { $Steps += "try { WY 'Enabling .NET Framework 3.5...'; Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3' -All -NoRestart -ErrorAction Stop | Out-Null; WG '.NET Framework 3.5 enabled' } catch { Write-Warning `$_.Exception.Message; `$Failed++ }" }
         $ElevatedScript = (@('$ErrorActionPreference = "Continue"', '$Failed = 0') + $Helpers + $Steps + @(
             'if ($Failed -gt 0) { Write-Warning "$Failed install(s) failed"; Read-Host "Press Enter to close this window" }',
             'exit $Failed')) -join "`n"
         $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ElevatedScript))
-        $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $Encoded -Verb RunAs -Wait -PassThru
+        # Start-Process throws when the elevation prompt is declined; treat that like a failed install
+        try {
+            $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $Encoded -Verb RunAs -Wait -PassThru -ErrorAction Stop
+        } catch {
+            $Process = [pscustomobject]@{ ExitCode = $What.Count }
+        }
         if ($Process.ExitCode -ne 0) {
             Write-Warning "$($Process.ExitCode) prerequisite install(s) failed or the elevation was declined. Continuing; run setup again to retry."
         }
@@ -2069,7 +2128,7 @@ function Invoke-UnrealGenerate {
     # Go through Build.bat so UBT runs on the engine's bundled .NET runtime rather than requiring a system-wide install
     $BuildBatchFile = Join-Path (Get-UnrealEngineDirectory -UProjectPath $UProjectPath) "Engine\Build\BatchFiles\Build.bat"
     WC "Generating project files..."
-    & $BuildBatchFile -ProjectFiles "-Project=`"$UProjectPath`"" -Game -Silent
+    & $BuildBatchFile -ProjectFiles "-Project=`"$UProjectPath`"" -Game -Silent | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Project file generation failed with exit code $LASTEXITCODE"
     }
@@ -2085,7 +2144,8 @@ function Invoke-UnrealBuild {
         throw "Build.bat not found at: $BuildBatchFile"
     }
     WC "Building $ProjectName Editor (Development Win64)..."
-    & $BuildBatchFile "${ProjectName}Editor" Win64 Development "-Project=`"$UProjectPath`"" -Progress -NoEngineChanges -NoHotReloadFromIDE
+    # Out-Host: the build log must reach the screen, not become part of this function's $true/$false result
+    & $BuildBatchFile "${ProjectName}Editor" Win64 Development "-Project=`"$UProjectPath`"" -Progress -NoEngineChanges -NoHotReloadFromIDE | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Build failed with exit code $LASTEXITCODE"
         return $false
@@ -2402,6 +2462,7 @@ function Show-QueHelp {
     Write-Host "  clean                    - Remove intermediates for a clean rebuild"
     Write-Host "  package                  - Package client/server builds"
     Write-Host "  syncthing                - Open the SyncThing web UI"
+    Write-Host "  deps                     - Install or repair prerequisites (MSVC toolchain, Unreal Engine)"
     Write-Host "  info                     - Display workspace and clone info"
     Write-Host "  new [name]               - Create a new clone from origin/main"
     Write-Host "  clone [name]             - Duplicate the current clone's state"
@@ -2595,6 +2656,7 @@ function Invoke-QueMain {
                         "clean"     { Clean-UnrealProject -CloneRoot $global:QueCloneRoot }
                         "package"   { Package-UnrealProject -CloneRoot $global:QueCloneRoot }
                         "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $global:QueWorkspaceRoot }
+                        "deps"      { Install-AllDependencies }
                         "info"      { Show-WorkspaceInfo -WorkspaceRoot $global:QueWorkspaceRoot -CloneRoot $global:QueCloneRoot }
                         "new"       { Invoke-QueNewCommand -WorkspaceRoot $global:QueWorkspaceRoot -CloneName $Arg | Out-Null }
                         "clone"     { Invoke-QueCloneCommand -WorkspaceRoot $global:QueWorkspaceRoot -SourceCloneRoot $global:QueCloneRoot -CloneName $Arg | Out-Null }
@@ -2617,7 +2679,7 @@ function Invoke-QueMain {
                 }
             }
 
-            $QueSubcommands = @('open','build','clean','package','syncthing','info','new','clone','save','load','import','update','rename','reset','publish','help','exit')
+            $QueSubcommands = @('open','build','clean','package','syncthing','deps','info','new','clone','save','load','import','update','rename','reset','publish','help','exit')
             $QueCompleter = {
                 param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
 
@@ -2671,6 +2733,9 @@ function Invoke-QueMain {
             Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
             WC "==============================================================="
             WC "Type 'que <command>' or 'que help' for available commands.`n"
+            if (-not (Get-UnrealEngineInstallDirectory -EngineVersion $QueUnrealEngineVersion) -or ((Get-QueBuildToolsPath) -and -not (Test-QueMsvcInstalled $QueMsvcComponents))) {
+                WY "This machine is missing Unreal Engine $QueUnrealEngineVersion or the MSVC toolchain it builds with. Run 'que deps' to install them.`n"
+            }
         }
     }
 }

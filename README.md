@@ -65,6 +65,7 @@ Once your workspace is set up, launch the management terminal using the shortcut
 - **clean** - Delete intermediate files for full rebuild
 - **package** - Create standalone client and server builds
 - **syncthing** - Open the SyncThing web UI
+- **deps** - Install or repair prerequisites. If Visual Studio Build Tools is already installed but lacks the MSVC toolchain this engine version builds with, it updates Build Tools and adds it. It also checks for the Unreal Engine version and opens the Epic Games Launcher if it is missing.
 - **info** - Display workspace and project information
 
 ## Regenerating the project script in an existing workspace
