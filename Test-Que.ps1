@@ -1227,8 +1227,8 @@ try {
 
         # Verify clone is on its own work branch
         $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($CurrentBranch -ne "que/$($FirstClone.Name)") {
-            Write-TestFailure "Clone did not switch to work branch after creation. Expected que/$($FirstClone.Name), got $CurrentBranch"
+        if ($CurrentBranch -ne "que/$($script:TestResults.ForgeUser)/$($FirstClone.Name)") {
+            Write-TestFailure "Clone did not switch to work branch after creation. Expected que/$($script:TestResults.ForgeUser)/$($FirstClone.Name), got $CurrentBranch"
         }
         Write-TestSuccess "Clone is on work branch: $CurrentBranch"
 
@@ -1288,7 +1288,7 @@ try {
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
-            'Ensure-QueCloneOnWorkBranch',
+            'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueCloneWorkBranch', 'Set-QueCloneWorkBranch',
             'Initialize-QueForgeConfig', 'Get-QueCloneUrl', 'Import-QueWorkspaceForge', 'Expand-QueReadme', 'Write-QueTokenError',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain'
         )
@@ -1335,9 +1335,9 @@ try {
         # Verify second clone is on its own work branch
         Push-Location $SecondClone.FullName
         $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($CurrentBranch -ne "que/$($SecondClone.Name)") {
+        if ($CurrentBranch -ne "que/$($script:TestResults.ForgeUser)/$($SecondClone.Name)") {
             Pop-Location
-            Write-TestFailure "Second clone did not switch to work branch after creation. Expected que/$($SecondClone.Name), got $CurrentBranch"
+            Write-TestFailure "Second clone did not switch to work branch after creation. Expected que/$($script:TestResults.ForgeUser)/$($SecondClone.Name), got $CurrentBranch"
         }
         Write-TestSuccess "Second clone is on work branch: $CurrentBranch"
         Pop-Location
@@ -1402,9 +1402,9 @@ try {
         # Run via shortcut-style launch so we test the real user path (que save / que publish).
         Invoke-QueViaShortcut -CloneRoot $SecondClonePath -QueCommand "save" | Out-Null
         $SavedBranch = git -C $SecondClonePath rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($SavedBranch -ne "que/$SecondCloneName") {
+        if ($SavedBranch -ne "que/$($script:TestResults.ForgeUser)/$SecondCloneName") {
             Pop-Location
-            Write-TestFailure "Unexpected save branch name. Expected que/$SecondCloneName, got $SavedBranch"
+            Write-TestFailure "Unexpected save branch name. Expected que/$($script:TestResults.ForgeUser)/$SecondCloneName, got $SavedBranch"
         }
         Write-TestSuccess "Saved changes via 'que save' on branch: $SavedBranch"
 
@@ -1412,22 +1412,22 @@ try {
         Write-TestSuccess "Published via 'que publish lkg' to main and updated tag 'lkg'"
 
         # Ensure clone returns to its work branch after publish (new flow)
-        Ensure-QueCloneOnWorkBranch -CloneRoot $SecondClonePath -CloneName $SecondCloneName -SkipIfDirty:$true
+        Ensure-QueCloneOnWorkBranch -CloneRoot $SecondClonePath -SkipIfDirty:$true
         $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($CurrentBranch -ne "que/$SecondCloneName") {
+        if ($CurrentBranch -ne "que/$($script:TestResults.ForgeUser)/$SecondCloneName") {
             Pop-Location
-            Write-TestFailure "Clone did not return to work branch after publish. Expected que/$SecondCloneName, got $CurrentBranch"
+            Write-TestFailure "Clone did not return to work branch after publish. Expected que/$($script:TestResults.ForgeUser)/$SecondCloneName, got $CurrentBranch"
         }
         Write-TestSuccess "Clone is on work branch after publish: $CurrentBranch"
 
         # Verify remote work branch exists
-        $BranchRef = "refs/remotes/origin/que/$SecondCloneName"
+        $BranchRef = "refs/remotes/origin/que/$($script:TestResults.ForgeUser)/$SecondCloneName"
         git show-ref --verify $BranchRef 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
-            Write-TestFailure "Remote branch not found after publish: que/$SecondCloneName"
+            Write-TestFailure "Remote branch not found after publish: que/$($script:TestResults.ForgeUser)/$SecondCloneName"
         }
-        Write-TestSuccess "Remote work branch exists: que/$SecondCloneName"
+        Write-TestSuccess "Remote work branch exists: que/$($script:TestResults.ForgeUser)/$SecondCloneName"
 
         # Verify the file is tracked by LFS
         $LfsLs = git lfs ls-files
@@ -1526,11 +1526,11 @@ try {
         Write-TestSuccess "Published device ID change via 'que publish'"
 
         # Ensure clone returns to its work branch after publish (new flow)
-        Ensure-QueCloneOnWorkBranch -CloneRoot $Workspace2ClonePath -CloneName $Workspace2CloneName -SkipIfDirty:$true
+        Ensure-QueCloneOnWorkBranch -CloneRoot $Workspace2ClonePath -SkipIfDirty:$true
         $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($CurrentBranch -ne "que/$Workspace2CloneName") {
+        if ($CurrentBranch -ne "que/$($script:TestResults.ForgeUser)/$Workspace2CloneName") {
             Pop-Location
-            Write-TestFailure "Clone did not return to work branch after publish. Expected que/$Workspace2CloneName, got $CurrentBranch"
+            Write-TestFailure "Clone did not return to work branch after publish. Expected que/$($script:TestResults.ForgeUser)/$Workspace2CloneName, got $CurrentBranch"
         }
         Write-TestSuccess "Clone is on work branch after publish: $CurrentBranch"
 
@@ -2028,10 +2028,10 @@ try {
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
-            'Ensure-QueCloneOnWorkBranch',
+            'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueCloneWorkBranch', 'Set-QueCloneWorkBranch',
             'Initialize-QueForgeConfig', 'Get-QueCloneUrl', 'Import-QueWorkspaceForge', 'Expand-QueReadme', 'Write-QueTokenError',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain', 'Invoke-QueGit',
-            'Get-QueCurrentBranch', 'Resolve-QueWorkBranchInput', 'Get-QueRemoteWorkBranchNames',
+            'Get-QueCurrentBranch', 'Get-QueLogin', 'Resolve-QueWorkBranchInput', 'Get-QueRemoteWorkBranchNames',
             'Get-QueCloneNameFromPath', 'Invoke-QueMerge',
             'Invoke-QuePushWithRetry', 'Invoke-QueStashAll', 'Invoke-QueSaveCommand',
             'Invoke-QueLoadCommand', 'Invoke-QueImportCommand', 'Invoke-QueUpdateCommand',
@@ -2076,9 +2076,9 @@ try {
         # Verify the new clone is on its own work branch
         Push-Location $NewCloneRoot
         $CurrentBranch = git rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($CurrentBranch -ne "que/$NewCloneName") {
+        if ($CurrentBranch -ne "que/$($script:TestResults.ForgeUser)/$NewCloneName") {
             Pop-Location
-            Write-TestFailure "New clone did not switch to work branch after creation. Expected que/$NewCloneName, got $CurrentBranch"
+            Write-TestFailure "New clone did not switch to work branch after creation. Expected que/$($script:TestResults.ForgeUser)/$NewCloneName, got $CurrentBranch"
         }
         Write-TestSuccess "New clone is on work branch: $CurrentBranch"
         Pop-Location
@@ -2175,9 +2175,9 @@ try {
         Set-Content -Path $ImportFile -Value $ImportContent -Encoding UTF8
         Invoke-QueViaShortcut -CloneRoot $PrimaryClonePath -QueCommand "save" | Out-Null
         $PrimaryBranch = git -C $PrimaryClonePath rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($PrimaryBranch -ne "que/$PrimaryCloneName") {
+        if ($PrimaryBranch -ne "que/$($script:TestResults.ForgeUser)/$PrimaryCloneName") {
             Pop-Location
-            Write-TestFailure "Unexpected primary branch name. Expected que/$PrimaryCloneName, got $PrimaryBranch"
+            Write-TestFailure "Unexpected primary branch name. Expected que/$($script:TestResults.ForgeUser)/$PrimaryCloneName, got $PrimaryBranch"
         }
         Write-TestSuccess "Created and saved import change via 'que save' on $PrimaryBranch"
         Pop-Location
@@ -2186,14 +2186,14 @@ try {
         Push-Location $SecondaryClonePath
         Invoke-QueViaShortcut -CloneRoot $SecondaryClonePath -QueCommand "save" | Out-Null
         $SecondaryBranch = git -C $SecondaryClonePath rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
-        if ($SecondaryBranch -ne "que/$SecondaryCloneName") {
+        if ($SecondaryBranch -ne "que/$($script:TestResults.ForgeUser)/$SecondaryCloneName") {
             Pop-Location
-            Write-TestFailure "Unexpected secondary branch name. Expected que/$SecondaryCloneName, got $SecondaryBranch"
+            Write-TestFailure "Unexpected secondary branch name. Expected que/$($script:TestResults.ForgeUser)/$SecondaryCloneName, got $SecondaryBranch"
         }
         Write-TestSuccess "Ensured secondary branch exists via 'que save': $SecondaryBranch"
 
         Invoke-QueViaShortcut -CloneRoot $SecondaryClonePath -QueCommand "import $PrimaryCloneName" | Out-Null
-        Write-TestSuccess "Imported que/$PrimaryCloneName into $SecondaryBranch via 'que import'"
+        Write-TestSuccess "Imported que/$($script:TestResults.ForgeUser)/$PrimaryCloneName into $SecondaryBranch via 'que import'"
 
         $ImportedFilePath = Join-Path $SecondaryClonePath $ImportFile
         if (-not (Test-Path $ImportedFilePath)) {
@@ -2247,17 +2247,82 @@ try {
         }
         Write-TestSuccess "Import completion returns normalized bare branch names"
 
-        $FullLocalPrefixCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que load que/$PrimaryPrefix"
-        if ($FullLocalPrefixCompletions -notcontains "que/$PrimaryCloneName") {
-            Write-TestFailure "Tab completion for 'que load que/$PrimaryPrefix' did not include 'que/$PrimaryCloneName'. Results: $($FullLocalPrefixCompletions -join ', ')"
+        $FullLocalPrefixCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que load que/$($script:TestResults.ForgeUser)/$PrimaryPrefix"
+        if ($FullLocalPrefixCompletions -notcontains "que/$($script:TestResults.ForgeUser)/$PrimaryCloneName") {
+            Write-TestFailure "Tab completion for 'que load que/$($script:TestResults.ForgeUser)/$PrimaryPrefix' did not include 'que/$($script:TestResults.ForgeUser)/$PrimaryCloneName'. Results: $($FullLocalPrefixCompletions -join ', ')"
         }
         Write-TestSuccess "Load completion preserves a typed 'que/' prefix"
 
-        $FullRemotePrefixCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que load origin/que/$PrimaryPrefix"
-        if ($FullRemotePrefixCompletions -notcontains "origin/que/$PrimaryCloneName") {
-            Write-TestFailure "Tab completion for 'que load origin/que/$PrimaryPrefix' did not include 'origin/que/$PrimaryCloneName'. Results: $($FullRemotePrefixCompletions -join ', ')"
+        $FullRemotePrefixCompletions = Get-QueCompletionsViaShortcut -CloneRoot $SecondaryClonePath -InputScript "que load origin/que/$($script:TestResults.ForgeUser)/$PrimaryPrefix"
+        if ($FullRemotePrefixCompletions -notcontains "origin/que/$($script:TestResults.ForgeUser)/$PrimaryCloneName") {
+            Write-TestFailure "Tab completion for 'que load origin/que/$($script:TestResults.ForgeUser)/$PrimaryPrefix' did not include 'origin/que/$($script:TestResults.ForgeUser)/$PrimaryCloneName'. Results: $($FullRemotePrefixCompletions -join ', ')"
         }
         Write-TestSuccess "Load completion preserves a typed 'origin/que/' prefix"
+
+        # Step 9.5: Named clones get que/<login>/<name> branches and flat folders
+        Write-Host "`nStep 9.5: Validating named clones" -ForegroundColor Cyan
+        $Login = $script:TestResults.ForgeUser
+        $NameCases = @(
+            @{ Name = 'aurelia';                Login = $Login; Branch = "que/$Login/aurelia";  Folder = 'aurelia' }
+            @{ Name = "$Login/aurelia";         Login = $Login; Branch = "que/$Login/aurelia";  Folder = 'aurelia' }
+            @{ Name = "$Login\aurelia";         Login = $Login; Branch = "que/$Login/aurelia";  Folder = 'aurelia' }
+            @{ Name = 'gaston/foo';                Login = $Login; Branch = 'que/gaston/foo';         Folder = 'gaston-foo' }
+            @{ Name = "$Login/area/topic";      Login = $Login; Branch = "que/$Login/area/topic"; Folder = 'area-topic' }
+            @{ Name = 'que/whuhaau';            Login = $Login; Branch = 'que/whuhaau';         Folder = 'whuhaau' }
+            @{ Name = "origin/que/$Login/x";    Login = $Login; Branch = "que/$Login/x";        Folder = 'x' }
+            @{ Name = 'solo';                   Login = $null;  Branch = 'que/solo';            Folder = 'solo' }
+        )
+        foreach ($Case in $NameCases) {
+            $Spec = Resolve-QueCloneName -Name $Case.Name -Login $Case.Login
+            if (-not $Spec -or $Spec.WorkBranch -ne $Case.Branch -or $Spec.Folder -ne $Case.Folder) {
+                Write-TestFailure "Resolve-QueCloneName '$($Case.Name)' gave '$($Spec.WorkBranch)' in '$($Spec.Folder)', expected '$($Case.Branch)' in '$($Case.Folder)'"
+            }
+        }
+        foreach ($BadName in @('', 'a b', '../x', 'x.lock', '.hidden', '-x')) {
+            if (Resolve-QueCloneName -Name $BadName -Login $Login) {
+                Write-TestFailure "Resolve-QueCloneName accepted invalid name '$BadName'"
+            }
+        }
+        Write-TestSuccess "Resolve-QueCloneName maps names to branches and folders"
+
+        foreach ($Case in @(@{ Name = "$Login/named-clone"; Branch = "que/$Login/named-clone"; Folder = 'named-clone' },
+                            @{ Name = 'someone/feature'; Branch = 'que/someone/feature'; Folder = 'someone-feature' })) {
+            $NamedCloneRoot = Invoke-QueCloneCommand -WorkspaceRoot $script:TestResults.Workspace1Path `
+                                                       -SourceCloneRoot $Workspace1PrimaryClonePath `
+                                                       -CloneName $Case.Name -SkipLaunch
+            $ExpectedRoot = Join-Path $script:TestResults.Workspace1Path "repo\$($Case.Folder)"
+            if ($NamedCloneRoot -ne $ExpectedRoot -or -not (Test-Path (Join-Path $ExpectedRoot '.git'))) {
+                Write-TestFailure "que clone $($Case.Name) made '$NamedCloneRoot', expected '$ExpectedRoot'"
+            }
+            $NamedBranch = git -C $NamedCloneRoot rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+            if ($NamedBranch -ne $Case.Branch) {
+                Write-TestFailure "que clone $($Case.Name) is on '$NamedBranch', expected '$($Case.Branch)'"
+            }
+            if ((Get-QueCloneWorkBranch -CloneRoot $NamedCloneRoot) -ne $Case.Branch) {
+                Write-TestFailure "que clone $($Case.Name) recorded work branch '$(Get-QueCloneWorkBranch -CloneRoot $NamedCloneRoot)', expected '$($Case.Branch)'"
+            }
+            if (-not (Test-Path (Join-Path $script:TestResults.Workspace1Path "open-$($Case.Folder).lnk"))) {
+                Write-TestFailure "que clone $($Case.Name) did not create open-$($Case.Folder).lnk"
+            }
+            Write-TestSuccess "que clone $($Case.Name) made repo\$($Case.Folder) on $($Case.Branch) with its shortcut"
+        }
+
+        # A rename is recorded, so later commands keep the clone on the renamed branch
+        $NamedCloneRoot = Join-Path $script:TestResults.Workspace1Path 'repo\named-clone'
+        Invoke-QueViaShortcut -CloneRoot $NamedCloneRoot -QueCommand "rename renamed-clone" | Out-Null
+        Invoke-QueViaShortcut -CloneRoot $NamedCloneRoot -QueCommand "info" | Out-Null
+        $RenamedBranch = git -C $NamedCloneRoot rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($RenamedBranch -ne "que/$Login/renamed-clone") {
+            Write-TestFailure "After 'que rename renamed-clone' and another command the clone is on '$RenamedBranch', expected 'que/$Login/renamed-clone'"
+        }
+        Write-TestSuccess "Rename is kept across commands: $RenamedBranch"
+
+        # A clone from before work-branch files keeps que/<clone>
+        Remove-Item (Join-Path $script:TestResults.Workspace1Path '.que\repo\someone-feature\work-branch')
+        if ((Get-QueCloneWorkBranch -CloneRoot (Join-Path $script:TestResults.Workspace1Path 'repo\someone-feature')) -ne 'que/someone-feature') {
+            Write-TestFailure "A clone without a work-branch file should fall back to que/<clone>"
+        }
+        Write-TestSuccess "Clones without a recorded work branch fall back to que/<clone>"
 
         Write-TestSuccess "Multiple clones test completed successfully"
     }

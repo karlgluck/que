@@ -199,7 +199,7 @@ workspace-root/
         +-- que-project.ps1 # Project management script
 ```
 
-**Clone Naming:** Each clone gets a unique Hawaiian-sounding name (e.g., Kauilani, Mahalo, Wakena) to make the randomness more pleasant and easily recognized.
+**Clone Naming:** Each clone gets a unique Hawaiian-sounding name (e.g., Kauilani, Mahalo, Wakena) to make the randomness more pleasant and easily recognized. Its work branch is `que/<your login>/<name>`, so it is easy to see whose branches are whose. A name you choose works the same way: `que clone aurelia` and `que clone karl/aurelia` both make `repo/aurelia` on `que/karl/aurelia` for the user karl. Another owner's prefix stays in the folder name with dashes for slashes (`que load gaston/foo` makes `repo/gaston-foo`).
 
 ## How It Works
 
@@ -565,6 +565,54 @@ function Get-NextCloneName {
     }
     # Fallback: append timestamp if all attempts fail
     return "Clone-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+}
+
+function Resolve-QueCloneName {
+    # Maps a clone or branch name as typed (aurelia, karl/aurelia, gaston/foo, que/gaston/foo, origin/que/gaston/foo)
+    # to its work branch and clone folder. Work branches are que/<owner>/<name>: a bare name gets $Login as
+    # its owner, while a name typed with que/ is taken as written. The folder drops the owner when it is
+    # $Login and joins any remaining segments with dashes (karl/aurelia -> aurelia, gaston/foo -> gaston-foo).
+    # Returns $null if the name cannot be a branch and a folder.
+    param([string]$Name, [string]$Login)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+    $Path = $Name.Trim() -replace '\\', '/'
+    $IsExplicit = $Path -match '^(origin/)?que/'
+    $Path = $Path -replace '^origin/', '' -replace '^que/', ''
+    [string[]]$Segments = @($Path -split '/' | Where-Object { $_ })
+    if ($Segments.Count -eq 0) { return $null }
+    foreach ($Segment in $Segments) {
+        if ($Segment -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $Segment -match '\.\.' -or $Segment -like '*.lock') { return $null }
+    }
+    $IsBare = (-not $IsExplicit) -and $Segments.Count -eq 1
+    if ($IsBare -and $Login) { $Segments = @($Login) + $Segments }
+    $FolderSegments = if ($Login -and $Segments.Count -gt 1 -and $Segments[0] -eq $Login) { $Segments[1..($Segments.Count - 1)] } else { $Segments }
+    return [pscustomobject]@{
+        WorkBranch = 'que/' + ($Segments -join '/')
+        Folder     = $FolderSegments -join '-'
+        IsBare     = $IsBare
+    }
+}
+
+function Get-QueCloneWorkBranch {
+    # A clone's work branch is recorded in .que\repo\<clone>\work-branch; clones made before that use que/<clone>
+    param([string]$CloneRoot)
+    $CloneName = Split-Path $CloneRoot -Leaf
+    $WorkspaceRoot = Split-Path (Split-Path $CloneRoot -Parent) -Parent
+    $BranchFile = Join-Path $WorkspaceRoot ".que\repo\$CloneName\work-branch"
+    if (Test-Path $BranchFile) {
+        $Recorded = "$(Get-Content $BranchFile -TotalCount 1)".Trim()
+        if ($Recorded) { return $Recorded }
+    }
+    return "que/$CloneName"
+}
+
+function Set-QueCloneWorkBranch {
+    param([string]$CloneRoot, [string]$WorkBranch)
+    $CloneName = Split-Path $CloneRoot -Leaf
+    $WorkspaceRoot = Split-Path (Split-Path $CloneRoot -Parent) -Parent
+    $CloneMetaPath = Join-Path $WorkspaceRoot ".que\repo\$CloneName"
+    New-Item -ItemType Directory -Force -Path $CloneMetaPath | Out-Null
+    Set-Content -Path (Join-Path $CloneMetaPath "work-branch") -Value $WorkBranch
 }
 
 function Find-UProjectFile {
@@ -1512,7 +1560,8 @@ function New-QueClone {
         [string]$Token = $null,
         [hashtable]$SyncThingInfo = $null,
         [string]$CloneName = $null,
-        [string]$SourcePath = $null
+        [string]$SourcePath = $null,
+        [string]$WorkBranch = $null
     )
     $ForgeOwner = Get-Content "$WorkspaceRoot\.que\forge-owner"
     $ForgeRepo = Get-Content "$WorkspaceRoot\.que\forge-repo"
@@ -1532,11 +1581,21 @@ function New-QueClone {
     if (-not $CloneName) {
         $CloneName = Get-NextCloneName -WorkspaceRoot $WorkspaceRoot
     }
+    $CloneSpec = Resolve-QueCloneName -Name $CloneName -Login $UserInfo.login
+    if (-not $CloneSpec) {
+        throw "Invalid clone name '$CloneName'. Use letters, digits, '.', '_' and '-', with '/' between an owner and a name."
+    }
+    $CloneName = $CloneSpec.Folder
+    if (-not $WorkBranch) { $WorkBranch = $CloneSpec.WorkBranch }
     $CloneRoot = Join-Path $WorkspaceRoot "repo\$CloneName"
-    WC "Creating clone: $CloneName"
+    if ((Test-Path $CloneRoot) -and (Get-ChildItem -Force -Path $CloneRoot | Select-Object -First 1)) {
+        throw "Clone folder already exists and is not empty: $CloneRoot"
+    }
+    WC "Creating clone: $CloneName (work branch $WorkBranch)"
     New-Item -ItemType Directory -Force -Path $CloneRoot | Out-Null
     $CloneMetaPath = "$WorkspaceRoot\.que\repo\$CloneName"
     New-Item -ItemType Directory -Force -Path $CloneMetaPath | Out-Null
+    Set-QueCloneWorkBranch -CloneRoot $CloneRoot -WorkBranch $WorkBranch
     Store-GitCredentials -Login $UserInfo.login -Token $Token
     if ($SourcePath) {
         if (-not (Test-Path $SourcePath)) {
@@ -1665,7 +1724,7 @@ function New-QueClone {
     New-WindowsShortcut -ShortcutPath $ShortcutPath -TargetScript $TargetScript
     WG "Created shortcut: $ShortcutPath"
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"
-    Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -CloneName $CloneName -SkipIfDirty:$false
+    Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -SkipIfDirty:$false
     return $CloneRoot
 }
 
@@ -1696,11 +1755,11 @@ function Invoke-QueGit {
     }
 }
 
-# Ensures a clone stays on its own work branch (que/<clone>) when safe to do so.
+# Ensures a clone stays on its own work branch (see Get-QueCloneWorkBranch) when safe to do so.
 function Ensure-QueCloneOnWorkBranch {
-    param([string]$CloneRoot, [string]$CloneName, [switch]$SkipIfDirty = $true)
-    if (-not $CloneRoot -or -not $CloneName) { return }
-    $WorkBranch = "que/$CloneName"
+    param([string]$CloneRoot, [switch]$SkipIfDirty = $true)
+    if (-not $CloneRoot) { return }
+    $WorkBranch = Get-QueCloneWorkBranch -CloneRoot $CloneRoot
     $CurrentBranchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
     $CurrentBranch = $CurrentBranchResult.Output | Select-Object -First 1
     if ($CurrentBranchResult.ExitCode -ne 0 -or -not $CurrentBranch) { return }
@@ -1714,8 +1773,11 @@ function Ensure-QueCloneOnWorkBranch {
     }
 
     $BranchExists = (Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/heads/$WorkBranch") -AllowFailure).ExitCode -eq 0
+    $RemoteBranchExists = (Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/remotes/origin/$WorkBranch") -AllowFailure).ExitCode -eq 0
     if ($BranchExists) {
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("checkout", $WorkBranch) -AllowFailure | Out-Null
+    } elseif ($RemoteBranchExists) {
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("checkout", "-b", $WorkBranch, "--track", "origin/$WorkBranch") -AllowFailure | Out-Null
     } else {
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("checkout", "-b", $WorkBranch) -AllowFailure | Out-Null
     }
@@ -1753,28 +1815,29 @@ function Get-QueCurrentBranch {
     return ($Result.Output | Select-Object -First 1)
 }
 
+function Get-QueLogin {
+    # The forge login this clone works as (set by Set-QueGitConfig), or $null
+    param([string]$CloneRoot)
+    $Result = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("config", "--get", "credential.username") -AllowFailure
+    if ($Result.ExitCode -ne 0) { return $null }
+    $Login = "$($Result.Output | Select-Object -First 1)".Trim()
+    if ($Login) { return $Login }
+    return $null
+}
+
 function Resolve-QueWorkBranchInput {
-    param([string]$Name)
-    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
-
-    $InputName = $Name.Trim()
-    $WorkBranch = $null
-    if ($InputName -match '^origin/(que/.+)$') {
-        $WorkBranch = $matches[1]
-    } elseif ($InputName -match '^(que/.+)$') {
-        $WorkBranch = $matches[1]
-    } else {
-        $WorkBranch = "que/$InputName"
-    }
-
-    if ($WorkBranch -notmatch '^que/(.+)$') { return $null }
-
-    return [pscustomobject]@{
-        InputName   = $InputName
-        WorkBranch  = $WorkBranch
-        LogicalName = $matches[1]
-        RemoteRef   = "origin/$WorkBranch"
-    }
+    # Resolves a work branch name as typed (see Resolve-QueCloneName). A bare name means your own
+    # que/<login>/<name>, or the older que/<name> when only that exists on origin.
+    param([string]$CloneRoot, [string]$Name)
+    $Login = Get-QueLogin -CloneRoot $CloneRoot
+    $Spec = Resolve-QueCloneName -Name $Name -Login $Login
+    if (-not $Spec -or -not ($Spec.IsBare -and $Login)) { return $Spec }
+    $OwnCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("ls-remote", "--exit-code", "origin", "refs/heads/$($Spec.WorkBranch)") -AllowFailure
+    if ($OwnCheck.ExitCode -eq 0) { return $Spec }
+    $Legacy = Resolve-QueCloneName -Name $Name -Login $null
+    $LegacyCheck = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("ls-remote", "--exit-code", "origin", "refs/heads/$($Legacy.WorkBranch)") -AllowFailure
+    if ($LegacyCheck.ExitCode -eq 0) { return $Legacy }
+    return $Spec
 }
 
 function Get-QueRemoteWorkBranchNames {
@@ -1842,7 +1905,7 @@ function Invoke-QueSaveCommand {
         if ($WorkspaceRoot) {
             Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -TimeoutSeconds 300 | Out-Null
         }
-        $WorkBranch = "que/$CloneName"
+        $WorkBranch = Get-QueCloneWorkBranch -CloneRoot $CloneRoot
         $Existing = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("show-ref", "--verify", "refs/heads/$WorkBranch") -AllowFailure
         if ($Existing.ExitCode -eq 0) {
             Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $WorkBranch) | Out-Null
@@ -1870,12 +1933,15 @@ function Invoke-QueSaveCommand {
 function Invoke-QueLoadCommand {
     param([string]$WorkspaceRoot, [string]$SourceCloneRoot, [string]$Name, [switch]$SkipLaunch = $false)
     if (-not $Name) { throw "Branch name is required for 'que load'." }
-    $BranchSpec = Resolve-QueWorkBranchInput -Name $Name
+    if (-not $SourceCloneRoot) {
+        throw "A source clone path is required for 'que load'."
+    }
+    $BranchSpec = Resolve-QueWorkBranchInput -CloneRoot $SourceCloneRoot -Name $Name
     if (-not $BranchSpec) {
         throw "Invalid work branch name for 'que load': $Name"
     }
     $BranchName = $BranchSpec.WorkBranch
-    $LogicalName = $BranchSpec.LogicalName
+    $FolderName = $BranchSpec.Folder
     $ExistingCloneRoot = $null
     $RepoDir = Join-Path $WorkspaceRoot "repo"
     if (Test-Path $RepoDir) {
@@ -1907,25 +1973,21 @@ function Invoke-QueLoadCommand {
         }
         return $ExistingCloneRoot
     }
-    if (-not $SourceCloneRoot) {
-        throw "A source clone path is required for 'que load'."
-    }
-    $RemoteCheck = Invoke-QueGit -WorkingDir $SourceCloneRoot -GitArgs @("ls-remote", "--exit-code", "origin", $BranchName) -AllowFailure
+    $RemoteCheck = Invoke-QueGit -WorkingDir $SourceCloneRoot -GitArgs @("ls-remote", "--exit-code", "origin", "refs/heads/$BranchName") -AllowFailure
     if ($RemoteCheck.ExitCode -ne 0) {
         throw "Work branch $BranchName does not exist on origin."
     }
-    $TargetClonePath = Join-Path $WorkspaceRoot "repo\$LogicalName"
+    $TargetClonePath = Join-Path $WorkspaceRoot "repo\$FolderName"
     if (Test-Path $TargetClonePath) {
         $CurrentBranch = Invoke-QueGit -WorkingDir $TargetClonePath -GitArgs @("rev-parse", "--abbrev-ref", "HEAD") -AllowFailure
         $CurrentBranchName = if ($CurrentBranch.ExitCode -eq 0) { $CurrentBranch.Output | Select-Object -First 1 } else { "(unknown)" }
         throw "Clone path already exists at $TargetClonePath (current branch: $CurrentBranchName). Please open that clone or choose a different branch name."
     }
     WC "Loading $BranchName into a new clone..."
-    $CloneRoot = Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $LogicalName -SkipLaunch
-    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $BranchName) | Out-Null
-    $SwitchResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", "-c", $BranchName, "--track", "origin/$BranchName") -AllowFailure
-    if ($SwitchResult.ExitCode -ne 0) {
-        throw "Failed to switch clone to $BranchName.`n$($SwitchResult.Output -join "`n")"
+    # New-QueClone switches to the recorded work branch, tracking origin's copy
+    $CloneRoot = Invoke-QueNewCommand -WorkspaceRoot $WorkspaceRoot -CloneName $FolderName -WorkBranch $BranchName -SkipLaunch
+    if ((Get-QueCurrentBranch -CloneRoot $CloneRoot) -ne $BranchName) {
+        throw "Failed to switch clone to $BranchName."
     }
     WG "Loaded $BranchName into clone $(Split-Path $CloneRoot -Leaf)"
     $ShortcutPath = Join-Path $WorkspaceRoot "open-$((Split-Path $CloneRoot -Leaf)).lnk"
@@ -1942,7 +2004,7 @@ function Invoke-QueImportCommand {
     if ($CurrentBranch -eq $script:QueMainBranch) {
         $CurrentBranch = Invoke-QueSaveCommand -CloneRoot $CloneRoot
     }
-    $BranchSpec = Resolve-QueWorkBranchInput -Name $Name
+    $BranchSpec = Resolve-QueWorkBranchInput -CloneRoot $CloneRoot -Name $Name
     if (-not $BranchSpec) {
         throw "Invalid work branch name for 'que import': $Name"
     }
@@ -1980,13 +2042,19 @@ function Invoke-QueRenameCommand {
     if ($CurrentBranch -eq $script:QueMainBranch) {
         throw "Cannot rename the main branch."
     }
-    $NewBranch = "que/$Name"
+    $BranchSpec = Resolve-QueCloneName -Name $Name -Login (Get-QueLogin -CloneRoot $CloneRoot)
+    if (-not $BranchSpec) {
+        throw "Invalid work branch name for 'que rename': $Name"
+    }
+    $NewBranch = $BranchSpec.WorkBranch
     if ($CurrentBranch -eq $NewBranch) {
         Write-Host "Branch already named $NewBranch" -ForegroundColor Gray
         return $NewBranch
     }
     $OldBranch = $CurrentBranch
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("branch", "-m", $NewBranch) | Out-Null
+    # Record it so the session keeps this clone on the renamed branch
+    Set-QueCloneWorkBranch -CloneRoot $CloneRoot -WorkBranch $NewBranch
     Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $NewBranch | Out-Null
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "origin", ":$OldBranch") -AllowFailure | Out-Null
     WG "Renamed $OldBranch to $NewBranch locally and on origin."
@@ -2063,9 +2131,9 @@ function Invoke-QuePublishCommand {
 }
 
 function Invoke-QueNewCommand {
-    param([string]$WorkspaceRoot, [string]$CloneName = $null, [switch]$SkipLaunch = $false)
+    param([string]$WorkspaceRoot, [string]$CloneName = $null, [string]$WorkBranch = $null, [switch]$SkipLaunch = $false)
     WC "Creating new clone from origin/$($script:QueMainBranch)..."
-    $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone:$false -ShouldClone:$true -CloneName $CloneName
+    $CloneRoot = New-QueClone -WorkspaceRoot $WorkspaceRoot -IsFirstClone:$false -ShouldClone:$true -CloneName $CloneName -WorkBranch $WorkBranch
     $Name = Split-Path $CloneRoot -Leaf
     $ShortcutPath = Join-Path $WorkspaceRoot "open-$Name.lnk"
     if ((-not $SkipLaunch) -and (Test-Path $ShortcutPath)) {
@@ -2464,13 +2532,13 @@ function Show-QueHelp {
     Write-Host "  syncthing                - Open the SyncThing web UI"
     Write-Host "  deps                     - Install or repair prerequisites (MSVC toolchain, Unreal Engine)"
     Write-Host "  info                     - Display workspace and clone info"
-    Write-Host "  new [name]               - Create a new clone from origin/main"
-    Write-Host "  clone [name]             - Duplicate the current clone's state"
-    Write-Host "  save                     - Commit/push current branch (creates que/<clone> if on main)"
-    Write-Host "  load <branch>            - Load branch que/<branch> into a clone (reuses existing if present)"
-    Write-Host "  import <branch>          - Merge origin/que/<branch> into the current branch"
+    Write-Host "  new [name]               - Create a new clone from origin/main on que/<you>/<name>"
+    Write-Host "  clone [name]             - Duplicate the current clone's state onto que/<you>/<name>"
+    Write-Host "  save                     - Commit/push current branch (creates this clone's work branch if on main)"
+    Write-Host "  load <branch>            - Load que/<you>/<branch> or que/<owner>/<branch> into a clone (reuses existing if present)"
+    Write-Host "  import <branch>          - Merge origin/que/<you>/<branch> or que/<owner>/<branch> into the current branch"
     Write-Host "  update                   - Merge latest origin/main into the current branch"
-    Write-Host "  rename <branch>          - Rename current work branch to que/<branch>"
+    Write-Host "  rename <branch>          - Rename current work branch to que/<you>/<branch>"
     Write-Host "  reset                    - Stash changes and reset to origin/main"
     Write-Host "  publish [tag=$DefaultPublishTag] - Publish current work into main and tag it"
     Write-Host "  exit                     - Close the QUE session`n"
@@ -2643,6 +2711,7 @@ function Invoke-QueMain {
             $global:QueCloneRoot = $CloneRoot
             $global:QueWorkspaceRoot = $WorkspaceRoot
             $global:QueCloneName = $CloneName
+            $global:QueLogin = Get-QueLogin -CloneRoot $CloneRoot
             $global:QueDefaultPublishTag = $script:QueDefaultPublishTag
 
             function global:que {
@@ -2672,7 +2741,7 @@ function Invoke-QueMain {
                         default     { Write-Host "Unknown command: $Command. Type 'que help' for a list of commands." -ForegroundColor Red; return }
                     }
                     if ($Command -notin @("exit", "help")) {
-                        Ensure-QueCloneOnWorkBranch -CloneRoot $global:QueCloneRoot -CloneName $global:QueCloneName -SkipIfDirty:$true
+                        Ensure-QueCloneOnWorkBranch -CloneRoot $global:QueCloneRoot -SkipIfDirty:$true
                     }
                 } catch {
                     Write-Host $_.Exception.Message -ForegroundColor Red
@@ -2715,6 +2784,13 @@ function Invoke-QueMain {
                     $completionPrefix = 'origin/que/'
                 } elseif ($wordToComplete -like 'que/*') {
                     $completionPrefix = 'que/'
+                } elseif ($global:QueLogin) {
+                    # Your own branches also complete without the owner, the way you would type them
+                    $ownPrefix = "$($global:QueLogin)/"
+                    $branchNames = @($branchNames | ForEach-Object {
+                        if ($_.StartsWith($ownPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { $_.Substring($ownPrefix.Length) }
+                        $_
+                    })
                 }
 
                 foreach ($branchName in $branchNames) {
@@ -2729,7 +2805,7 @@ function Invoke-QueMain {
 
             WC "`n==============================================================="
             WG "  QUE - $script:QueForgeOwner/$script:QueForgeRepo"
-            WY "  Clone: $CloneName"
+            WY "  Clone: $CloneName ($(Get-QueCloneWorkBranch -CloneRoot $CloneRoot))"
             Write-Host "  Workspace: $WorkspaceRoot" -ForegroundColor Gray
             WC "==============================================================="
             WC "Type 'que <command>' or 'que help' for available commands.`n"

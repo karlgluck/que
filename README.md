@@ -67,6 +67,20 @@ Once your workspace is set up, launch the management terminal using the shortcut
 - **syncthing** - Open the SyncThing web UI
 - **deps** - Install or repair prerequisites. If Visual Studio Build Tools is already installed but lacks the MSVC toolchain this engine version builds with, it updates Build Tools and adds it. It also checks for the Unreal Engine version and opens the Epic Games Launcher if it is missing.
 - **info** - Display workspace and project information
+- **new**, **clone**, **save**, **load**, **import**, **rename**, **update**, **reset**, **publish** - Work-branch commands; run `que help` in the terminal for details
+
+## Clone and branch names
+
+Each clone works on its own branch, `que/<login>/<name>`, where `<login>` is your login on the git host. On a shared repository the branch list then shows whose branches are whose. The clone's folder is `repo/<name>`, without the login:
+
+| You type (as `karl`) | Work branch | Folder |
+| --- | --- | --- |
+| `que new` | `que/karl/kauilani` (random name) | `repo/kauilani` |
+| `que clone aurelia` or `que clone karl/aurelia` | `que/karl/aurelia` | `repo/aurelia` |
+| `que load gaston/foo` | `que/gaston/foo` | `repo/gaston-foo` |
+| `que load que/whuhaau` | `que/whuhaau` (typed with `que/`, taken as written) | `repo/whuhaau` |
+
+A bare name passed to `load` or `import` means your own branch. If only an older `que/<name>` branch exists on origin, it means that one. Each clone records its work branch in `.que/repo/<clone>/work-branch`; clones made before that use `que/<clone>`.
 
 ## Regenerating the project script in an existing workspace
 
