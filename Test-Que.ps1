@@ -2340,15 +2340,38 @@ try {
         }
         Write-TestSuccess "A clone on que/<clone> moves to que/$Login/<clone> and drops the old upstream"
 
-        # A push refused by a hook fails at once instead of merging origin/main and retrying
-        Set-Content -Path (Join-Path $OtherCloneRoot '.git\hooks\pre-push') -Value "#!/bin/sh`necho QUETEST_HOOK_REFUSED >&2`nexit 1" -Encoding ASCII
-        $HeadBefore = git -C $OtherCloneRoot rev-parse HEAD 2>&1 | Select-Object -First 1
+        # 'que save' is a backup and skips the repository's pre-push hook; 'que publish' runs it and stops there
+        $HookPath = Join-Path $OtherCloneRoot '.git\hooks\pre-push'
+        $SavedHook = if (Test-Path $HookPath) { [IO.File]::ReadAllText($HookPath) } else { $null }
+        [IO.File]::WriteAllText($HookPath, "#!/bin/sh`nread line`necho ""QUETEST_HOOK_REFUSED [`$line]"" >&2`nexit 1`n")
+        Set-Content -Path (Join-Path $OtherCloneRoot 'gated-change.txt') -Value "gated $(Get-Date -Format o)"
         $SaveOutput = (Invoke-QueViaShortcut -CloneRoot $OtherCloneRoot -QueCommand "save").Output -join "`n"
-        $HeadAfter = git -C $OtherCloneRoot rev-parse HEAD 2>&1 | Select-Object -First 1
-        if ($SaveOutput -match 'merging origin' -or $SaveOutput -notmatch 'QUETEST_HOOK_REFUSED' -or $HeadAfter -ne $HeadBefore) {
-            Write-TestFailure "A push refused by a hook should fail at once without merging. Output:`n$SaveOutput"
+        $OtherHead = git -C $OtherCloneRoot rev-parse HEAD 2>&1 | Select-Object -First 1
+        $RemoteOther = git -C $OtherCloneRoot ls-remote origin refs/heads/que/someone/feature 2>&1 | Select-Object -First 1
+        if ($SaveOutput -match 'QUETEST_HOOK_REFUSED' -or "$RemoteOther" -notmatch "^$OtherHead") {
+            Write-TestFailure "'que save' should push past a refusing pre-push hook. Remote: '$RemoteOther', HEAD $OtherHead. Output:`n$SaveOutput"
         }
-        Write-TestSuccess "A push refused by a hook fails without merging or retrying"
+        Write-TestSuccess "'que save' backs up the branch without running the pre-push hook"
+        $MainBefore = git -C $OtherCloneRoot ls-remote origin refs/heads/main 2>&1 | Select-Object -First 1
+        $PublishOutput = (Invoke-QueViaShortcut -CloneRoot $OtherCloneRoot -QueCommand "publish").Output -join "`n"
+        $MainAfter = git -C $OtherCloneRoot ls-remote origin refs/heads/main 2>&1 | Select-Object -First 1
+        if ($PublishOutput -notmatch [regex]::Escape("QUETEST_HOOK_REFUSED [refs/heads/que/someone/feature $OtherHead refs/heads/que/someone/feature $OtherHead]") -or $MainAfter -ne $MainBefore -or $PublishOutput -match 'merging origin') {
+            Write-TestFailure "'que publish' should run the pre-push hook with git's ref line and stop when it refuses. main $MainBefore -> $MainAfter. Output:`n$PublishOutput"
+        }
+        Write-TestSuccess "'que publish' runs the pre-push hook and stops when it refuses"
+
+        # With the hook passing, publish merges the branch through a pull request
+        if ($null -ne $SavedHook) { [IO.File]::WriteAllText($HookPath, $SavedHook) } else { Remove-Item $HookPath }
+        $PublishOutput = (Invoke-QueViaShortcut -CloneRoot $OtherCloneRoot -QueCommand "publish").Output -join "`n"
+        git -C $OtherCloneRoot fetch -q origin main 2>&1 | Out-Null
+        git -C $OtherCloneRoot merge-base --is-ancestor $OtherHead origin/main
+        $InMain = $LASTEXITCODE -eq 0
+        $MainSubject = git -C $OtherCloneRoot log -1 --format=%s origin/main 2>&1 | Select-Object -First 1
+        $StillOnBranch = git -C $OtherCloneRoot rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if (-not $InMain -or $PublishOutput -notmatch 'pull request #\d+' -or $StillOnBranch -ne 'que/someone/feature') {
+            Write-TestFailure "'que publish' should merge the branch into main through a pull request and stay on it. In main: $InMain, main tip '$MainSubject', branch '$StillOnBranch'. Output:`n$PublishOutput"
+        }
+        Write-TestSuccess "'que publish' merged through a pull request ('$MainSubject') and stayed on $StillOnBranch"
 
         Write-TestSuccess "Multiple clones test completed successfully"
     }

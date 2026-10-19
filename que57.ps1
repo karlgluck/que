@@ -1874,26 +1874,140 @@ function Invoke-QueMerge {
 }
 
 function Invoke-QuePushWithRetry {
+    # Pushes a work branch as a backup. Repository push hooks (such as a review gate) are skipped with
+    # --no-verify; they run when the branch is published (Invoke-QuePrePushHook). The Git LFS upload the
+    # skipped hook would have done is run directly.
     param([string]$CloneRoot, [string]$Branch, [int]$MaxAttempts = 3)
     $DelaySeconds = 2
     for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
-        $PushResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "-u", "origin", $Branch) -AllowFailure
+        $PushResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "--no-verify", "-u", "origin", $Branch) -AllowFailure
         if ($PushResult.ExitCode -eq 0) {
+            $LfsResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("lfs", "push", "origin", $Branch) -AllowFailure
+            if ($LfsResult.ExitCode -ne 0) {
+                WY "Warning: pushed $Branch, but uploading its LFS objects failed:`n$($LfsResult.Output -join "`n")"
+            }
             return $PushResult
         }
-        # Only a push that lost a race (origin moved on) is worth merging and retrying. Anything else, such as
-        # a pre-push hook, an authentication error or a server-side refusal, fails the same way every time.
+        # Only a push that lost a race (origin's copy of the branch moved on) is worth merging and retrying.
+        # Anything else, such as an authentication error or a server-side refusal, fails the same way every time.
         if (($PushResult.Output -join "`n") -notmatch '\[rejected\][^\r\n]*\((fetch first|non-fast-forward)\)') {
             throw "Push failed.`n$($PushResult.Output -join "`n")"
         }
         if ($Attempt -eq $MaxAttempts) {
             throw "Push failed after $MaxAttempts attempts.`n$($PushResult.Output -join "`n")"
         }
-        WY "Push rejected; merging origin/$($script:QueMainBranch) then retrying (attempt $($Attempt + 1) of $MaxAttempts)..."
-        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch)
-        Invoke-QueMerge -CloneRoot $CloneRoot -Source ("origin/{0}" -f $script:QueMainBranch) -Message ("que: merge origin/{0}" -f $script:QueMainBranch)
+        WY "Push rejected; merging origin/$Branch then retrying (attempt $($Attempt + 1) of $MaxAttempts)..."
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $Branch)
+        Invoke-QueMerge -CloneRoot $CloneRoot -Source "origin/$Branch" -Message "que: merge origin/$Branch"
         Start-Sleep -Seconds $DelaySeconds
         $DelaySeconds = [Math]::Min($DelaySeconds * 2, 30)
+    }
+}
+
+function Get-QueShell {
+    # Git for Windows' sh, which git itself uses to run hooks
+    $Git = (Get-Command git -ErrorAction SilentlyContinue).Source
+    if ($Git) {
+        $GitRoot = Split-Path (Split-Path $Git -Parent) -Parent
+        foreach ($Candidate in @("bin\sh.exe", "usr\bin\sh.exe")) {
+            $Path = Join-Path $GitRoot $Candidate
+            if (Test-Path $Path) { return $Path }
+        }
+    }
+    $Sh = (Get-Command sh -ErrorAction SilentlyContinue).Source
+    if ($Sh) { return $Sh }
+    throw "Cannot find sh to run the repository's git hooks. Is Git for Windows installed?"
+}
+
+function Invoke-QuePrePushHook {
+    # Runs the repository's pre-push hook for the branch about to be published, exactly as 'git push' would
+    # (arguments: remote and URL; stdin: one ref line), so publishing goes through the same checks as a manual
+    # push even though 'que save' skipped them. Throws with the hook's output if it refuses.
+    param([string]$CloneRoot, [string]$Branch)
+    $HooksDir = "$((Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--git-path", "hooks")).Output | Select-Object -First 1)".Trim()
+    if (-not [System.IO.Path]::IsPathRooted($HooksDir)) { $HooksDir = Join-Path $CloneRoot $HooksDir }
+    $Hook = Join-Path $HooksDir "pre-push"
+    if (-not (Test-Path $Hook)) { return }
+    $Sha = "$((Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "HEAD")).Output | Select-Object -First 1)".Trim()
+    $RemoteShaResult = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-parse", "--verify", "--quiet", "refs/remotes/origin/$Branch") -AllowFailure
+    $RemoteSha = if ($RemoteShaResult.ExitCode -eq 0) { "$($RemoteShaResult.Output | Select-Object -First 1)".Trim() } else { "0" * 40 }
+    $Url = "$((Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("remote", "get-url", "origin")).Output | Select-Object -First 1)".Trim()
+    WC "Running the repository's pre-push checks for $Branch..."
+    $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $StartInfo.FileName = Get-QueShell
+    # sh pipes the ref line into the hook itself: .NET's redirected stdin would start with a UTF-8 BOM, which
+    # the hook would read as part of the ref. Arguments: hook, remote, URL, ref line; stderr folds into stdout.
+    $RefLine = "refs/heads/$Branch $Sha refs/heads/$Branch $RemoteSha"
+    $StartInfo.Arguments = "-c 'printf ""%s\n"" ""`$3"" | ""`$0"" ""`$1"" ""`$2"" 2>&1' ""$($Hook -replace '\\', '/')"" origin ""$Url"" ""$RefLine"""
+    $StartInfo.WorkingDirectory = $CloneRoot
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.RedirectStandardOutput = $true
+    $Process = [System.Diagnostics.Process]::Start($StartInfo)
+    $Output = $Process.StandardOutput.ReadToEnd()
+    $Process.WaitForExit()
+    if ($Output.Trim()) { Write-Host $Output.TrimEnd() }
+    if ($Process.ExitCode -ne 0) {
+        throw "The repository's pre-push hook refused to publish $Branch (exit code $($Process.ExitCode)). Nothing was merged."
+    }
+}
+
+function Invoke-QueForgeApi {
+    param([string]$WorkspaceRoot, [string]$Method, [string]$Path, [object]$Body = $null)
+    $Token = Get-SecureForgeToken -WorkspaceRoot $WorkspaceRoot
+    if (-not $Token) { throw "No $script:QueForgeLabel token found in $WorkspaceRoot\env\forge." }
+    $Params = @{
+        Method = $Method
+        Uri = "$script:QueApiBase$Path"
+        Headers = @{ Authorization = "token $Token"; 'Cache-Control' = 'no-store' }
+        UseBasicParsing = $true
+        ErrorAction = 'Stop'
+    }
+    if ($null -ne $Body) {
+        $Params.Body = [System.Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 5))
+        $Params.ContentType = 'application/json; charset=utf-8'
+    }
+    return Invoke-RestMethod @Params
+}
+
+function Get-QueOpenPullRequest {
+    # The open pull request from $Branch into main, or $null
+    param([string]$WorkspaceRoot, [string]$Branch)
+    $RepoPath = "/repos/$script:QueForgeOwner/$script:QueForgeRepo"
+    if ($script:QueIsGitHub) {
+        $Pulls = @(Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Get -Path "$RepoPath/pulls?state=open&base=$($script:QueMainBranch)&head=$($script:QueForgeOwner):$Branch")
+        return ($Pulls | Select-Object -First 1)
+    }
+    for ($Page = 1; $Page -le 10; $Page++) {
+        $Pulls = @(Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Get -Path "$RepoPath/pulls?state=open&limit=50&page=$Page")
+        $Match = $Pulls | Where-Object { $_.head.ref -eq $Branch -and $_.base.ref -eq $script:QueMainBranch } | Select-Object -First 1
+        if ($Match) { return $Match }
+        if ($Pulls.Count -lt 50) { break }
+    }
+    return $null
+}
+
+function Invoke-QueMergePullRequest {
+    # Merges a pull request on the forge with a merge commit. Returns $true, or $false with the reason shown.
+    param([string]$WorkspaceRoot, [object]$PullRequest)
+    $MergePath = "/repos/$script:QueForgeOwner/$script:QueForgeRepo/pulls/$($PullRequest.number)/merge"
+    # The forge works out whether a new pull request can merge in the background; give it a few tries
+    for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
+        try {
+            if ($script:QueIsGitHub) {
+                Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Put -Path $MergePath -Body @{ merge_method = "merge" } | Out-Null
+            } else {
+                Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Post -Path $MergePath -Body @{ Do = "merge" } | Out-Null
+            }
+            return $true
+        } catch {
+            $Reason = $_.Exception.Message
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $Reason = "$Reason $($_.ErrorDetails.Message)" }
+            if ($Attempt -eq 5) {
+                WY "$script:QueForgeLabel did not merge pull request #$($PullRequest.number): $Reason"
+                return $false
+            }
+            Start-Sleep -Seconds 2
+        }
     }
 }
 
@@ -2085,19 +2199,39 @@ function Invoke-QueResetCommand {
 }
 
 function Invoke-QuePublishCommand {
+    # Gets the current work into main through a pull request: back up the branch, run the repository's pre-push
+    # checks on it, then open (or reuse) the pull request and merge it on the forge. Main is not merged into the
+    # branch first: the forge does the merge, so publishing adds no commit that would need checking again.
     param([string]$CloneRoot, [string]$TagName)
+    $WorkspaceRoot = Split-Path (Split-Path $CloneRoot -Parent) -Parent
     $WorkBranch = Invoke-QueSaveCommand -CloneRoot $CloneRoot
-    Invoke-QueUpdateCommand -CloneRoot $CloneRoot | Out-Null
-    $CurrentBranch = Get-QueCurrentBranch -CloneRoot $CloneRoot
-    if ($CurrentBranch -eq $script:QueMainBranch) {
-        $WorkBranch = $script:QueMainBranch
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch) | Out-Null
+    $Ahead = [int]"$((Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("rev-list", "--count", "origin/$($script:QueMainBranch)..HEAD")).Output | Select-Object -First 1)".Trim()
+    if ($Ahead -eq 0) {
+        WG "$WorkBranch has nothing that is not already in $script:QueMainBranch."
     } else {
-        $WorkBranch = $CurrentBranch
+        Invoke-QuePrePushHook -CloneRoot $CloneRoot -Branch $WorkBranch
+        $PullRequest = Get-QueOpenPullRequest -WorkspaceRoot $WorkspaceRoot -Branch $WorkBranch
+        if ($PullRequest) {
+            WC "Using open pull request #$($PullRequest.number): $($PullRequest.html_url)"
+        } else {
+            $Commits = @((Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("log", "--no-merges", "--format=- %s", "-n", "50", "origin/$($script:QueMainBranch)..HEAD")).Output)
+            $PullRequest = Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Post -Path "/repos/$script:QueForgeOwner/$script:QueForgeRepo/pulls" -Body @{
+                title = "Publish $WorkBranch"
+                head  = $WorkBranch
+                base  = $script:QueMainBranch
+                body  = "Published with 'que publish'.`n`n$($Commits -join "`n")"
+            }
+            WC "Opened pull request #$($PullRequest.number): $($PullRequest.html_url)"
+        }
+        if (-not (Invoke-QueMergePullRequest -WorkspaceRoot $WorkspaceRoot -PullRequest $PullRequest)) {
+            WY "Your work is pushed and the pull request is open: $($PullRequest.html_url)"
+            WY "Resolve what the forge reports (for example run 'que update' to merge main again), then run 'que publish' again."
+            return $WorkBranch
+        }
+        WG "Merged pull request #$($PullRequest.number) into $script:QueMainBranch."
     }
-    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $script:QueMainBranch) | Out-Null
-    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("pull", "--no-rebase", "origin", $script:QueMainBranch) | Out-Null
-    Invoke-QueMerge -CloneRoot $CloneRoot -Source $WorkBranch -Message ("que: publish {0}" -f $WorkBranch) | Out-Null
-    Invoke-QuePushWithRetry -CloneRoot $CloneRoot -Branch $script:QueMainBranch | Out-Null
+    Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch) | Out-Null
 
     # Push LFS objects to the git host for disaster recovery
     WC "Publishing LFS files to $script:QueForgeLabel for backup..."
@@ -2129,12 +2263,11 @@ function Invoke-QuePublishCommand {
     }
 
     if ($TagName) {
-        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("tag", "-f", $TagName) | Out-Null
-        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "-f", "origin", $TagName) | Out-Null
+        # The tag names the merge the forge just made, which the repository's push checks never saw as a
+        # branch tip; its content is what was checked above, so the tag push skips them
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("tag", "-f", $TagName, "origin/$($script:QueMainBranch)") | Out-Null
+        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "--no-verify", "-f", "origin", $TagName) | Out-Null
         WG "Moved tag $TagName to $script:QueMainBranch and pushed."
-    }
-    if ($WorkBranch -ne $script:QueMainBranch) {
-        Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("switch", $WorkBranch) | Out-Null
     }
     return $WorkBranch
 }
@@ -2543,13 +2676,13 @@ function Show-QueHelp {
     Write-Host "  info                     - Display workspace and clone info"
     Write-Host "  new [name]               - Create a new clone from origin/main on que/<you>/<name>"
     Write-Host "  clone [name]             - Duplicate the current clone's state onto que/<you>/<name>"
-    Write-Host "  save                     - Commit/push current branch (creates this clone's work branch if on main)"
+    Write-Host "  save                     - Commit and back up the current branch (skips repository push checks)"
     Write-Host "  load <branch>            - Load que/<you>/<branch> or que/<owner>/<branch> into a clone (reuses existing if present)"
     Write-Host "  import <branch>          - Merge origin/que/<you>/<branch> or que/<owner>/<branch> into the current branch"
     Write-Host "  update                   - Merge latest origin/main into the current branch"
     Write-Host "  rename <branch>          - Rename current work branch to que/<you>/<branch>"
     Write-Host "  reset                    - Stash changes and reset to origin/main"
-    Write-Host "  publish [tag=$DefaultPublishTag] - Publish current work into main and tag it"
+    Write-Host "  publish [tag=$DefaultPublishTag] - Run the repository's push checks, merge into main through a pull request, and tag it"
     Write-Host "  exit                     - Close the QUE session`n"
 }
 #>###QUE_MANAGEMENT_MODE_END###

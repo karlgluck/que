@@ -69,6 +69,11 @@ Once your workspace is set up, launch the management terminal using the shortcut
 - **info** - Display workspace and project information
 - **new**, **clone**, **save**, **load**, **import**, **rename**, **update**, **reset**, **publish** - Work-branch commands; run `que help` in the terminal for details
 
+## Saving and publishing
+
+- **save** commits everything in the clone and pushes the work branch as a backup. The push skips the repository's git push hooks (`--no-verify`), so checks meant for work going to main, such as a review gate, don't stand in the way of a backup. que uploads the branch's Git LFS objects itself, which the skipped hook would otherwise have done.
+- **publish** saves, then runs the repository's `pre-push` hook on the branch the same way `git push` would. It stops there if the hook refuses. Otherwise it opens a pull request from the branch into main (or reuses the open one) and merges it on the git host as a merge commit. Then it backs up all LFS objects and moves the tag (`lkg` by default) to the new main. It never merges main into your branch itself, so a publish adds no commit of its own. If the host can't merge (a conflict, or a required approval), publish leaves the pull request open and prints its link. Run `que update` to merge main and resolve the conflict, then publish again.
+
 ## Clone and branch names
 
 Each clone works on its own branch, `que/<login>/<name>`, where `<login>` is your login on the git host. On a shared repository the branch list then shows whose branches are whose. The clone's folder is `repo/<name>`, without the login:
