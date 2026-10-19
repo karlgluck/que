@@ -80,7 +80,9 @@ Each clone works on its own branch, `que/<login>/<name>`, where `<login>` is you
 | `que load gaston/foo` | `que/gaston/foo` | `repo/gaston-foo` |
 | `que load que/whuhaau` | `que/whuhaau` (typed with `que/`, taken as written) | `repo/whuhaau` |
 
-A bare name passed to `load` or `import` means your own branch. If only an older `que/<name>` branch exists on origin, it means that one. Each clone records its work branch in `.que/repo/<clone>/work-branch`; clones made before that use `que/<clone>`.
+A bare name passed to `load` or `import` means your own branch. If only an older `que/<name>` branch exists on origin, it means that one.
+
+The branch a clone is on is its work branch. QUE never moves a clone off a branch you chose, whether that is your own, someone else's you loaded or one you renamed. `publish` switches back to the branch it published. Only a clone on `main` (for example after `reset`) is moved, to `que/<login>/<folder>`. A clone still on the older default `que/<folder>` is renamed locally to `que/<login>/<folder>` the first time a session opens or a command runs with no uncommitted changes. The old branch on origin is left alone.
 
 ## Regenerating the project script in an existing workspace
 

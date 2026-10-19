@@ -1288,7 +1288,7 @@ try {
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
-            'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueCloneWorkBranch', 'Set-QueCloneWorkBranch',
+            'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueLogin', 'Get-QueDefaultWorkBranch',
             'Initialize-QueForgeConfig', 'Get-QueCloneUrl', 'Import-QueWorkspaceForge', 'Expand-QueReadme', 'Write-QueTokenError',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain'
         )
@@ -2028,10 +2028,10 @@ try {
             'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
-            'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueCloneWorkBranch', 'Set-QueCloneWorkBranch',
+            'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueLogin', 'Get-QueDefaultWorkBranch',
             'Initialize-QueForgeConfig', 'Get-QueCloneUrl', 'Import-QueWorkspaceForge', 'Expand-QueReadme', 'Write-QueTokenError',
             'New-QueWorkspace', 'New-QueClone', 'Invoke-QueMain', 'Invoke-QueGit',
-            'Get-QueCurrentBranch', 'Get-QueLogin', 'Resolve-QueWorkBranchInput', 'Get-QueRemoteWorkBranchNames',
+            'Get-QueCurrentBranch', 'Resolve-QueWorkBranchInput', 'Get-QueRemoteWorkBranchNames',
             'Get-QueCloneNameFromPath', 'Invoke-QueMerge',
             'Invoke-QuePushWithRetry', 'Invoke-QueStashAll', 'Invoke-QueSaveCommand',
             'Invoke-QueLoadCommand', 'Invoke-QueImportCommand', 'Invoke-QueUpdateCommand',
@@ -2298,17 +2298,15 @@ try {
             if ($NamedBranch -ne $Case.Branch) {
                 Write-TestFailure "que clone $($Case.Name) is on '$NamedBranch', expected '$($Case.Branch)'"
             }
-            if ((Get-QueCloneWorkBranch -CloneRoot $NamedCloneRoot) -ne $Case.Branch) {
-                Write-TestFailure "que clone $($Case.Name) recorded work branch '$(Get-QueCloneWorkBranch -CloneRoot $NamedCloneRoot)', expected '$($Case.Branch)'"
-            }
             if (-not (Test-Path (Join-Path $script:TestResults.Workspace1Path "open-$($Case.Folder).lnk"))) {
                 Write-TestFailure "que clone $($Case.Name) did not create open-$($Case.Folder).lnk"
             }
             Write-TestSuccess "que clone $($Case.Name) made repo\$($Case.Folder) on $($Case.Branch) with its shortcut"
         }
 
-        # A rename is recorded, so later commands keep the clone on the renamed branch
+        # The branch a clone is on is its work branch: a rename and someone else's branch both stay put
         $NamedCloneRoot = Join-Path $script:TestResults.Workspace1Path 'repo\named-clone'
+        $OtherCloneRoot = Join-Path $script:TestResults.Workspace1Path 'repo\someone-feature'
         Invoke-QueViaShortcut -CloneRoot $NamedCloneRoot -QueCommand "rename renamed-clone" | Out-Null
         Invoke-QueViaShortcut -CloneRoot $NamedCloneRoot -QueCommand "info" | Out-Null
         $RenamedBranch = git -C $NamedCloneRoot rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
@@ -2316,13 +2314,41 @@ try {
             Write-TestFailure "After 'que rename renamed-clone' and another command the clone is on '$RenamedBranch', expected 'que/$Login/renamed-clone'"
         }
         Write-TestSuccess "Rename is kept across commands: $RenamedBranch"
-
-        # A clone from before work-branch files keeps que/<clone>
-        Remove-Item (Join-Path $script:TestResults.Workspace1Path '.que\repo\someone-feature\work-branch')
-        if ((Get-QueCloneWorkBranch -CloneRoot (Join-Path $script:TestResults.Workspace1Path 'repo\someone-feature')) -ne 'que/someone-feature') {
-            Write-TestFailure "A clone without a work-branch file should fall back to que/<clone>"
+        Invoke-QueViaShortcut -CloneRoot $OtherCloneRoot -QueCommand "info" | Out-Null
+        $OtherBranch = git -C $OtherCloneRoot rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($OtherBranch -ne 'que/someone/feature') {
+            Write-TestFailure "A clone on someone else's branch moved to '$OtherBranch' after a command, expected 'que/someone/feature'"
         }
-        Write-TestSuccess "Clones without a recorded work branch fall back to que/<clone>"
+        Write-TestSuccess "A clone on someone else's branch stays on it: $OtherBranch"
+
+        # A clone on the older default que/<clone> is moved to que/<login>/<clone> without touching origin
+        git -C $NamedCloneRoot switch -q -c que/named-clone 2>&1 | Out-Null
+        git -C $NamedCloneRoot config branch.que/named-clone.remote origin
+        git -C $NamedCloneRoot config branch.que/named-clone.merge refs/heads/que/named-clone
+        Invoke-QueViaShortcut -CloneRoot $NamedCloneRoot | Out-Null
+        $MigratedBranch = git -C $NamedCloneRoot rev-parse --abbrev-ref HEAD 2>&1 | Select-Object -First 1
+        if ($MigratedBranch -ne "que/$Login/named-clone") {
+            Write-TestFailure "A clone on que/named-clone was not moved to que/$Login/named-clone when its session opened (on '$MigratedBranch')"
+        }
+        git -C $NamedCloneRoot show-ref --verify --quiet refs/heads/que/named-clone
+        if ($LASTEXITCODE -eq 0) {
+            Write-TestFailure "The old que/named-clone branch still exists after the move"
+        }
+        git -C $NamedCloneRoot rev-parse --abbrev-ref '@{upstream}' 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-TestFailure "The moved branch still tracks the old upstream"
+        }
+        Write-TestSuccess "A clone on que/<clone> moves to que/$Login/<clone> and drops the old upstream"
+
+        # A push refused by a hook fails at once instead of merging origin/main and retrying
+        Set-Content -Path (Join-Path $OtherCloneRoot '.git\hooks\pre-push') -Value "#!/bin/sh`necho QUETEST_HOOK_REFUSED >&2`nexit 1" -Encoding ASCII
+        $HeadBefore = git -C $OtherCloneRoot rev-parse HEAD 2>&1 | Select-Object -First 1
+        $SaveOutput = (Invoke-QueViaShortcut -CloneRoot $OtherCloneRoot -QueCommand "save").Output -join "`n"
+        $HeadAfter = git -C $OtherCloneRoot rev-parse HEAD 2>&1 | Select-Object -First 1
+        if ($SaveOutput -match 'merging origin' -or $SaveOutput -notmatch 'QUETEST_HOOK_REFUSED' -or $HeadAfter -ne $HeadBefore) {
+            Write-TestFailure "A push refused by a hook should fail at once without merging. Output:`n$SaveOutput"
+        }
+        Write-TestSuccess "A push refused by a hook fails without merging or retrying"
 
         Write-TestSuccess "Multiple clones test completed successfully"
     }
