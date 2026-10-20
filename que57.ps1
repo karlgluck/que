@@ -1988,8 +1988,8 @@ function Get-QueOpenPullRequest {
 
 function Invoke-QueMergePullRequest {
     # Merges a pull request on the forge with a merge commit, only if its head is still $HeadSha (the commit the
-    # pre-push checks saw), so a later push to the branch cannot ride along. Returns the merge commit's sha, or
-    # $null with the reason shown.
+    # pre-push checks saw), so a later push to the branch cannot ride along. Returns $true once merged, or
+    # $false with the reason shown.
     param([string]$WorkspaceRoot, [object]$PullRequest, [string]$HeadSha)
     $PullPath = "/repos/$script:QueForgeOwner/$script:QueForgeRepo/pulls/$($PullRequest.number)"
     # The forge works out whether a new pull request can merge in the background; give it a few tries
@@ -2000,13 +2000,13 @@ function Invoke-QueMergePullRequest {
             } else {
                 Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Post -Path "$PullPath/merge" -Body @{ Do = "merge"; head_commit_id = $HeadSha } | Out-Null
             }
-            return "$((Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Get -Path $PullPath).merge_commit_sha)"
+            return $true
         } catch {
             $Reason = $_.Exception.Message
             if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $Reason = "$Reason $($_.ErrorDetails.Message)" }
             if ($Attempt -eq 5) {
                 WY "$script:QueForgeLabel did not merge pull request #$($PullRequest.number): $Reason"
-                return $null
+                return $false
             }
             Start-Sleep -Seconds 2
         }
@@ -2238,14 +2238,20 @@ function Invoke-QuePublishCommand {
             }
             WC "Opened pull request #$($PullRequest.number): $($PullRequest.html_url)"
         }
-        $MergeSha = Invoke-QueMergePullRequest -WorkspaceRoot $WorkspaceRoot -PullRequest $PullRequest -HeadSha $Head
-        if (-not $MergeSha) {
+        if (-not (Invoke-QueMergePullRequest -WorkspaceRoot $WorkspaceRoot -PullRequest $PullRequest -HeadSha $Head)) {
             WY "Your work is pushed and the pull request is open: $($PullRequest.html_url)"
             WY "Resolve what the forge reports (for example run 'que update' to merge main again), then run 'que publish' again."
             return $WorkBranch
         }
         WG "Merged pull request #$($PullRequest.number) into $script:QueMainBranch."
-        $TagTarget = $MergeSha
+        $TagTarget = $null
+        try {
+            $TagTarget = "$((Invoke-QueForgeApi -WorkspaceRoot $WorkspaceRoot -Method Get -Path "/repos/$script:QueForgeOwner/$script:QueForgeRepo/pulls/$($PullRequest.number)").merge_commit_sha)".Trim()
+        } catch { }
+        if (-not $TagTarget -and $TagName) {
+            WY "Could not read the merge commit of pull request #$($PullRequest.number); tag $TagName was not moved."
+            $TagName = $null
+        }
     }
     Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("fetch", "origin", $script:QueMainBranch) | Out-Null
 
@@ -2279,8 +2285,9 @@ function Invoke-QuePublishCommand {
     }
 
     if ($TagName) {
-        # The tag names the merge the forge just made (not whatever main is now), which the repository's push
-        # checks never saw as a branch tip; its content is what was checked above, so the tag push skips them
+        # The tag names the merge the forge just made (or main itself when there was nothing to merge), which the
+        # repository's push checks never saw as a branch tip; what it adds went through them as a branch (above,
+        # or in the pull requests that built main), so the tag push skips them
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("tag", "-f", $TagName, $TagTarget) | Out-Null
         Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("push", "--no-verify", "-f", "origin", $TagName) | Out-Null
         WG "Moved tag $TagName to $script:QueMainBranch and pushed."
