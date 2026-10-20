@@ -2362,8 +2362,14 @@ try {
 
         # With the hook passing, publish merges the branch through a pull request
         if ($null -ne $SavedHook) { [IO.File]::WriteAllText($HookPath, $SavedHook) } else { Remove-Item $HookPath }
-        $PublishOutput = (Invoke-QueViaShortcut -CloneRoot $OtherCloneRoot -QueCommand "publish").Output -join "`n"
+        $PublishOutput = (Invoke-QueViaShortcut -CloneRoot $OtherCloneRoot -QueCommand "publish quetest-tag").Output -join "`n"
         git -C $OtherCloneRoot fetch -q origin main 2>&1 | Out-Null
+        $TagSha = "$(git -C $OtherCloneRoot ls-remote origin refs/tags/quetest-tag 2>&1 | Select-Object -First 1)".Split("`t")[0]
+        $MergeParent = git -C $OtherCloneRoot rev-parse "$TagSha^2" 2>&1 | Select-Object -First 1
+        if ($MergeParent -ne $OtherHead) {
+            Write-TestFailure "The publish tag should name the pull request's merge commit (second parent $OtherHead); it names $TagSha (second parent '$MergeParent')"
+        }
+        Write-TestSuccess "The publish tag names the pull request's merge commit"
         git -C $OtherCloneRoot merge-base --is-ancestor $OtherHead origin/main
         $InMain = $LASTEXITCODE -eq 0
         $MainSubject = git -C $OtherCloneRoot log -1 --format=%s origin/main 2>&1 | Select-Object -First 1
