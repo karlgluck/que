@@ -67,6 +67,7 @@ Once your workspace is set up, launch the management terminal using the shortcut
 - **syncthing** - Open the SyncThing web UI
 - **deps** - Install or repair prerequisites. If Visual Studio Build Tools is already installed but lacks the MSVC toolchain this engine version builds with, it updates Build Tools and adds it. It also checks for the Unreal Engine version and opens the Epic Games Launcher if it is missing.
 - **info** - Display workspace and project information
+- **lfs** - Replace Git LFS pointer files with their content. `new` and `clone` do this themselves: they clone without downloading LFS content, then check every LFS file out from the workspace's shared store, taking missing objects from the source clone, from SyncThing (it waits for the `git-lfs` folder) and from origin, in that order. Run it by hand when a clone still reports pointer files.
 - **new**, **clone**, **save**, **load**, **import**, **rename**, **update**, **reset**, **publish** - Work-branch commands; run `que help` in the terminal for details
 
 ## Saving and publishing

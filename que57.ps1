@@ -1544,6 +1544,70 @@ function Invoke-WithLfsSkip([scriptblock]$Block) {
     }
 }
 
+function Get-QueLfsPointerFiles {
+    # Returns the LFS files of a clone that are still pointer files: @{ Oid; Path; InStore }. InStore says whether
+    # the object is already in the clone's LFS storage (lfs.storage, or .git\lfs when unset).
+    param([string]$CloneRoot)
+    $Listing = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("lfs", "ls-files", "--long") -AllowFailure
+    if ($Listing.ExitCode -ne 0) { return @() }
+    $Storage = (Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("config", "--get", "lfs.storage") -AllowFailure).Output | Select-Object -First 1
+    if (-not $Storage) { $Storage = Join-Path $CloneRoot ".git\lfs" }
+    $Pointers = @()
+    foreach ($Line in $Listing.Output) {
+        if ("$Line" -match '^([0-9a-f]{64}) - (.+)$') {
+            $Oid = $matches[1]
+            $ObjectPath = Join-Path $Storage ("objects\{0}\{1}\{2}" -f $Oid.Substring(0, 2), $Oid.Substring(2, 2), $Oid)
+            $Pointers += [pscustomobject]@{ Oid = $Oid; Path = $matches[2]; InStore = (Test-Path $ObjectPath); ObjectPath = $ObjectPath }
+        }
+    }
+    return $Pointers
+}
+
+function Sync-QueLfsFiles {
+    # Replaces the LFS pointer files of a clone with their content. Clones are made with smudge skipped (fast: the
+    # objects usually are in the workspace's shared store already), so this runs once lfs.storage is set. Missing
+    # objects are taken, in order, from the source clone's own .git\lfs (que clone of a clone without lfs.storage),
+    # from SyncThing (waits for the git-lfs folder), and from origin. Returns the number of files still pointers.
+    param([string]$CloneRoot, [string]$WorkspaceRoot, [string]$SourcePath = $null)
+    $Pointers = @(Get-QueLfsPointerFiles -CloneRoot $CloneRoot)
+    if ($Pointers.Count -eq 0) { return 0 }
+    $Missing = @($Pointers | Where-Object { -not $_.InStore })
+    if ($Missing.Count -gt 0 -and $SourcePath) {
+        $Copied = 0
+        foreach ($Pointer in $Missing) {
+            $SourceObject = Join-Path $SourcePath (".git\lfs\objects\{0}\{1}\{2}" -f $Pointer.Oid.Substring(0, 2), $Pointer.Oid.Substring(2, 2), $Pointer.Oid)
+            if (Test-Path $SourceObject) {
+                New-Item -ItemType Directory -Force -Path (Split-Path $Pointer.ObjectPath -Parent) | Out-Null
+                Copy-Item -Path $SourceObject -Destination $Pointer.ObjectPath -Force
+                $Copied++
+            }
+        }
+        if ($Copied -gt 0) { WC "Copied $Copied LFS objects from the source clone into the shared store" }
+        $Missing = @(Get-QueLfsPointerFiles -CloneRoot $CloneRoot | Where-Object { -not $_.InStore })
+    }
+    if ($Missing.Count -gt 0 -and $WorkspaceRoot) {
+        WC "$($Missing.Count) LFS objects are not in the shared store yet; waiting for SyncThing..."
+        Wait-ForSyncThingLfsSync -WorkspaceRoot $WorkspaceRoot -Silent | Out-Null
+        $Missing = @(Get-QueLfsPointerFiles -CloneRoot $CloneRoot | Where-Object { -not $_.InStore })
+    }
+    if ($Missing.Count -gt 0) {
+        WC "Fetching $($Missing.Count) LFS objects from origin..."
+        $Fetch = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("lfs", "fetch", "origin") -AllowFailure
+        if ($Fetch.ExitCode -ne 0) { WY "git lfs fetch origin failed (exit $($Fetch.ExitCode)); continuing with the objects present" }
+    }
+    $Checkout = Invoke-QueGit -WorkingDir $CloneRoot -GitArgs @("lfs", "checkout") -AllowFailure
+    if ($Checkout.ExitCode -ne 0) { WY "git lfs checkout failed (exit $($Checkout.ExitCode))" }
+    $Left = @(Get-QueLfsPointerFiles -CloneRoot $CloneRoot)
+    if ($Left.Count -eq 0) {
+        WG "LFS files checked out ($($Pointers.Count) files)"
+    } else {
+        WY "$($Left.Count) LFS files are still pointer files (objects not available yet), for example:"
+        $Left | Select-Object -First 5 | ForEach-Object { WY "  $($_.Path)" }
+        WY "Run 'que lfs' once SyncThing has synced or origin has the objects."
+    }
+    return $Left.Count
+}
+
 function New-QueClone {
     # Creates a new clone in an existing workspace
     param(
@@ -1604,7 +1668,7 @@ function New-QueClone {
                 Set-QueGitConfig $UserInfo
             } finally { Pop-Location }
         }
-        WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
+        WC "Clone complete. LFS files are checked out once the shared store is set up"
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
     } elseif ($ShouldClone) {
         WC "Cloning $ForgeOwner/$ForgeRepo..."
@@ -1616,7 +1680,7 @@ function New-QueClone {
                 Set-QueGitConfig $UserInfo
             } finally { Pop-Location }
         }
-        WY "Clone complete. LFS pointer files created (objects will sync via SyncThing)"
+        WC "Clone complete. LFS files are checked out once the shared store is set up"
         Write-UEGitConfigFiles -CloneRoot $CloneRoot
         $ProjectScriptPath = "$CloneRoot\que-project.ps1"
         $RepoHasCommits = $true
@@ -1712,12 +1776,15 @@ function New-QueClone {
     $LfsStoragePath = Join-Path $WorkspaceRoot "sync\git-lfs\lfs"
     git config --local lfs.storage $LfsStoragePath
     Pop-Location
+    # Full files before the branch switch: a checkout with smudge on fails on objects nobody can provide
+    Sync-QueLfsFiles -CloneRoot $CloneRoot -WorkspaceRoot $WorkspaceRoot -SourcePath $SourcePath | Out-Null
     $ShortcutPath = "$WorkspaceRoot\open-$CloneName.lnk"
     $TargetScript = "$CloneRoot\que-project.ps1"
     New-WindowsShortcut -ShortcutPath $ShortcutPath -TargetScript $TargetScript
     WG "Created shortcut: $ShortcutPath"
     Set-Content -Path "$CloneMetaPath\repo-version" -Value "1"
     Ensure-QueCloneOnWorkBranch -CloneRoot $CloneRoot -WorkBranch $WorkBranch -SkipIfDirty:$false
+    Sync-QueLfsFiles -CloneRoot $CloneRoot -WorkspaceRoot $WorkspaceRoot | Out-Null
     return $CloneRoot
 }
 
@@ -2697,6 +2764,7 @@ function Show-QueHelp {
     Write-Host "  syncthing                - Open the SyncThing web UI"
     Write-Host "  deps                     - Install or repair prerequisites (MSVC toolchain, Unreal Engine)"
     Write-Host "  info                     - Display workspace and clone info"
+    Write-Host "  lfs                      - Replace LFS pointer files with their content (shared store, SyncThing, origin)"
     Write-Host "  new [name]               - Create a new clone from origin/main on que/<you>/<name>"
     Write-Host "  clone [name]             - Duplicate the current clone's state onto que/<you>/<name>"
     Write-Host "  save                     - Commit and back up the current branch (skips repository push checks)"
@@ -2892,6 +2960,7 @@ function Invoke-QueMain {
                         "syncthing" { Open-SyncThingBrowser -WorkspaceRoot $global:QueWorkspaceRoot }
                         "deps"      { Install-AllDependencies }
                         "info"      { Show-WorkspaceInfo -WorkspaceRoot $global:QueWorkspaceRoot -CloneRoot $global:QueCloneRoot }
+                        "lfs"       { Sync-QueLfsFiles -CloneRoot $global:QueCloneRoot -WorkspaceRoot $global:QueWorkspaceRoot | Out-Null }
                         "new"       { Invoke-QueNewCommand -WorkspaceRoot $global:QueWorkspaceRoot -CloneName $Arg | Out-Null }
                         "clone"     { Invoke-QueCloneCommand -WorkspaceRoot $global:QueWorkspaceRoot -SourceCloneRoot $global:QueCloneRoot -CloneName $Arg | Out-Null }
                         "save"      { Invoke-QueSaveCommand -CloneRoot $global:QueCloneRoot | Out-Null }
@@ -2913,7 +2982,7 @@ function Invoke-QueMain {
                 }
             }
 
-            $QueSubcommands = @('open','build','clean','package','syncthing','deps','info','new','clone','save','load','import','update','rename','reset','publish','help','exit')
+            $QueSubcommands = @('open','build','clean','package','syncthing','deps','info','lfs','new','clone','save','load','import','update','rename','reset','publish','help','exit')
             $QueCompleter = {
                 param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
 

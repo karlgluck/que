@@ -1285,7 +1285,7 @@ try {
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
             'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable', 'Get-UnrealEngineInstallDirectory',
-            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
+            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip', 'Get-QueLfsPointerFiles', 'Sync-QueLfsFiles',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
             'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueLogin', 'Get-QueDefaultWorkBranch',
@@ -2025,7 +2025,7 @@ try {
             'Get-NextCloneName', 'Find-UProjectFile', 'New-WindowsShortcut',
             'Test-IsAdmin', 'Install-NetFx3WithElevation', 'Sync-WingetPackage',
             'Get-UserSelectionIndex', 'Get-EpicGamesLauncherExecutable', 'Get-UnrealEngineInstallDirectory',
-            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip',
+            'Get-SyncThingExecutable', 'Ensure-SyncThingRunning', 'Invoke-WithLfsSkip', 'Get-QueLfsPointerFiles', 'Sync-QueLfsFiles',
             'Configure-SyncThingFolders', 'Update-SyncThingDevices', 'Write-GitConfigFiles',
             'Write-UEGitConfigFiles', 'Install-AllDependencies', 'New-QueRepoScript',
             'Ensure-QueCloneOnWorkBranch', 'Resolve-QueCloneName', 'Get-QueLogin', 'Get-QueDefaultWorkBranch',
@@ -2081,6 +2081,19 @@ try {
             Write-TestFailure "New clone did not switch to work branch after creation. Expected que/$($script:TestResults.ForgeUser)/$NewCloneName, got $CurrentBranch"
         }
         Write-TestSuccess "New clone is on work branch: $CurrentBranch"
+
+        # The new clone has full LFS files, not pointers
+        $PointerLines = @(git lfs ls-files --long 2>$null | Where-Object { "$_" -match '^[0-9a-f]{64} - ' })
+        if ($PointerLines.Count -gt 0) {
+            Pop-Location
+            Write-TestFailure "New clone still has $($PointerLines.Count) LFS pointer files, for example: $($PointerLines[0])"
+        }
+        $ClonedLfsFile = Join-Path $NewCloneRoot $LfsFileName
+        if ((Test-Path $ClonedLfsFile) -and ((Get-Content -Path $ClonedLfsFile -Raw) -match "^version https://git-lfs\.github\.com")) {
+            Pop-Location
+            Write-TestFailure "LFS file in the new clone is a pointer: $ClonedLfsFile"
+        }
+        Write-TestSuccess "New clone has full LFS files"
         Pop-Location
 
         # Step 9.2: Validate Clone Structure
